@@ -5,10 +5,18 @@ silently invalidates the experiment if it regresses, and none of them fails
 loudly at train time.
 """
 
+import dataclasses
+
 import pytest
 
 from subattr import config as C
 from subattr import train as T
+
+@dataclasses.dataclass
+class _PicklableSFTConfig:
+    warmup_steps: float = 0.0
+    packing: bool = False
+
 
 CFG = C.load(__import__("pathlib").Path(__file__).resolve().parents[1] / "configs" / "quick.yaml")
 
@@ -118,3 +126,71 @@ def test_compat_shim_raises_on_a_missing_critical_kwarg(monkeypatch):
     T.install_sftconfig_compat(verbose=False)
     with pytest.raises(RuntimeError, match="training objective"):
         FakeModule.SFTConfig(completion_only_loss=True)
+
+
+def test_compat_shim_returns_a_picklable_object(monkeypatch):
+    """The regression that cost an epoch: HF Trainer torch.saves the training
+    args at every checkpoint, and a dynamically-created subclass has no
+    importable qualified name.
+
+    `_PicklableSFTConfig` lives at module scope for the same reason -- a
+    function-local class is itself unpicklable, which is precisely the bug.
+    """
+    import pickle
+
+    class FakeModule:
+        SFTConfig = _PicklableSFTConfig
+
+    monkeypatch.setattr(T, "repo2_train", lambda: FakeModule)
+    T.install_sftconfig_compat(verbose=False)
+
+    cfg = FakeModule.SFTConfig(warmup_ratio=0.05, packing=False)
+    assert type(cfg) is _PicklableSFTConfig, "must return the real class, not a subclass"
+    restored = pickle.loads(pickle.dumps(cfg))
+    assert restored.warmup_steps == 0.05
+
+
+def test_compat_shim_is_idempotent(monkeypatch):
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Base:
+        warmup_steps: float = 0.0
+
+    class FakeModule:
+        SFTConfig = Base
+
+    monkeypatch.setattr(T, "repo2_train", lambda: FakeModule)
+    T.install_sftconfig_compat(verbose=False)
+    first = FakeModule.SFTConfig
+    T.install_sftconfig_compat(verbose=False)
+    assert FakeModule.SFTConfig is first, "double-install must not wrap the wrapper"
+
+
+def test_skip_requires_a_completion_marker_not_just_a_checkpoint(tmp_path):
+    """A crash during the end-of-epoch args save leaves a real adapter on disk
+    for a run that never finished. Skipping on that would return an
+    under-trained adapter labelled with the full epoch count."""
+    out = tmp_path / "student"
+    (out / "checkpoint-1250").mkdir(parents=True)
+    (out / "checkpoint-1250" / "adapter_config.json").write_text("{}")
+
+    assert not (out / "subattr_complete.json").exists()
+
+    # latest_adapter still resolves the partial checkpoint -- that is fine, the
+    # guard is that train_student must not SKIP on it.
+    assert T.latest_adapter(str(out)).endswith("checkpoint-1250")
+
+
+def test_latest_adapter_prefers_the_highest_checkpoint(tmp_path):
+    out = tmp_path / "s"
+    for step in (500, 3750, 1250):
+        d = out / f"checkpoint-{step}"
+        d.mkdir(parents=True)
+        (d / "adapter_config.json").write_text("{}")
+    assert T.latest_adapter(str(out)).endswith("checkpoint-3750")
+
+
+def test_latest_adapter_raises_when_nothing_is_there(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        T.latest_adapter(str(tmp_path / "empty"))

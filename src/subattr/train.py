@@ -22,6 +22,7 @@ result interpretable as a property of the method rather than of the recipe.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,7 +115,16 @@ _SFTCONFIG_CRITICAL = frozenset({
 def install_sftconfig_compat(verbose: bool = True) -> bool:
     """Patch repo2's `SFTConfig` reference to tolerate the installed TRL API.
 
-    Returns True if a shim was installed. A no-op on stacks where repo2's call
+    Implemented as a **factory**, not a subclass. HF Trainer `torch.save`s the
+    training arguments at every checkpoint, and a dynamically-created subclass is
+    not picklable -- a locally-defined class has no importable qualified name, so
+    the first end-of-epoch save dies with
+    `AttributeError: Can't get local object '...<locals>._CompatSFTConfig'`,
+    after the epoch has already been paid for. A factory returns a genuine
+    `SFTConfig` instance, which pickles like any other.
+
+    repo2 only ever calls `SFTConfig(...)` to construct, so a callable is a
+    drop-in. Returns True if a shim was installed; a no-op when repo2's call
     signature is still valid, so it is safe to call unconditionally.
     """
     import dataclasses
@@ -129,29 +139,28 @@ def install_sftconfig_compat(verbose: bool = True) -> bool:
     if not renames and _SFTCONFIG_CRITICAL <= supported:
         return False  # nothing to fix
 
-    class _CompatSFTConfig(base):  # type: ignore[misc,valid-type]
-        _subattr_compat = True
+    def _compat_sft_config(**kwargs):
+        out: dict = {}
+        for key, value in kwargs.items():
+            if key in supported:
+                out[key] = value
+            elif key in renames:
+                out[renames[key]] = value
+                if verbose:
+                    print(f"[compat] SFTConfig: {key}={value!r} -> {renames[key]}")
+            elif key in _SFTCONFIG_CRITICAL:
+                raise RuntimeError(
+                    f"SFTConfig no longer accepts {key!r}, which defines the training "
+                    f"objective. Refusing to train something different from what the "
+                    f"brief specifies. Pin an older trl/transformers, or map it explicitly."
+                )
+            elif verbose:
+                print(f"[compat] SFTConfig: dropping unsupported kwarg {key}={value!r}")
+        return base(**out)
 
-        def __init__(self, **kwargs):
-            out: dict = {}
-            for key, value in kwargs.items():
-                if key in supported:
-                    out[key] = value
-                elif key in renames:
-                    out[renames[key]] = value
-                    if verbose:
-                        print(f"[compat] SFTConfig: {key}={value!r} -> {renames[key]}")
-                elif key in _SFTCONFIG_CRITICAL:
-                    raise RuntimeError(
-                        f"SFTConfig no longer accepts {key!r}, which defines the training "
-                        f"objective. Refusing to train something different from what the "
-                        f"brief specifies. Pin an older trl/transformers, or map it explicitly."
-                    )
-                elif verbose:
-                    print(f"[compat] SFTConfig: dropping unsupported kwarg {key}={value!r}")
-            super().__init__(**out)
-
-    tr.SFTConfig = _CompatSFTConfig
+    _compat_sft_config._subattr_compat = True
+    _compat_sft_config.wrapped = base
+    tr.SFTConfig = _compat_sft_config
     if verbose:
         print(f"[compat] installed SFTConfig shim (renames: {renames or 'none'})")
     return True
@@ -172,9 +181,38 @@ def train_student(
 
     data_file = Path(data_file)
     out = Path(out_dir or (cfg.run_dir / "students" / name))
-    if (out / "adapter_config.json").exists() or any(out.glob("checkpoint-*/adapter_config.json")):
-        print(f"[skip] {name}: adapter already present at {out}")
+    marker = out / "subattr_complete.json"
+
+    # Skip only on a COMPLETED run. A bare adapter_config.json is not evidence of
+    # completion: HF Trainer writes the adapter before saving the training args,
+    # so a crash during the args save leaves a checkpoint on disk for a run that
+    # never finished. Skipping on that would silently hand back an
+    # under-trained adapter labelled with the full epoch count.
+    if marker.exists():
+        print(f"[skip] {name}: completed run already present at {out}")
     else:
+        stale = sorted(out.glob("checkpoint-*")) if out.exists() else []
+        if stale:
+            print(f"[warn] {name}: {len(stale)} checkpoint(s) from an incomplete run "
+                  f"({', '.join(p.name for p in stale[:4])}) -- retraining from scratch")
+        c = resolve_config(cfg, run_name=name, recipe=recipe, **overrides)
+        print(f"[train] {name}  recipe={recipe}\n{describe(c)}")
+        out.mkdir(parents=True, exist_ok=True)
+        repo2_train().train(c, str(data_file), str(out))
+        marker.write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "recipe": recipe,
+                    "config_hash": cfg.hash,
+                    "data_file": str(data_file),
+                    "num_train_epochs": c.num_train_epochs,
+                    "lora_alpha": c.lora_alpha,
+                    "n_examples": sum(1 for _ in data_file.open()),
+                },
+                indent=2,
+            )
+        )
         c = resolve_config(cfg, run_name=name, recipe=recipe, **overrides)
         print(f"[train] {name}  recipe={recipe}\n{describe(c)}")
         out.mkdir(parents=True, exist_ok=True)
