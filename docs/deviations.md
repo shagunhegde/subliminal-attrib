@@ -147,3 +147,26 @@ direction extraction (the `svd` protocol conditions on a neutral system prompt).
 
 Guarded by `test_scoring_default_is_provenance_blind` and
 `test_encoded_example_carries_no_trait_token`.
+
+## I2 — Model dtype must be explicit; gradient scale is not comparable across layers
+
+**Dtype.** Recent transformers default `from_pretrained(dtype="auto")`, loading the
+checkpoint's own dtype. Qwen2.5 checkpoints declare `torch_dtype: bfloat16`, so a bare
+`from_pretrained` yields **bf16, not fp32** — visible in the Phase 0 gate output, where
+gradient norms landed on exact 7-bit-mantissa values (`0.50390625 = 0.5 x (1 + 1/128)`).
+bf16 shares fp32's exponent range so nothing underflowed, but it carries ~3 decimal digits.
+
+Consequences: the tier's dtype is stated explicitly everywhere, and **Phase 6 must
+accumulate score dot products in fp32** regardless of the model's compute dtype. FULL
+training is bf16 per spec section 4.1, so scoring in bf16 matches the training dtype -- but
+the accumulation must not be.
+
+**Gradient scale by depth.** Measured on the QUICK model, `||grad_h L||` falls roughly two
+orders of magnitude with depth (embed 1.29e+01, block 0 1.48e+00, block 11 5.04e-01,
+block 23 8.15e-02). Raw `<g, delta>` scores are therefore not comparable across layers.
+
+This does *not* affect the per-layer AUROC heatmaps of spec Phase 7: AUROC is rank-based
+and invariant to any positive per-layer rescaling. It does affect anything that combines
+layers -- the Phase 8c layer/position ensembling must normalize per layer first (or operate
+on ranks), and the `cosine` aggregation already controls for the related per-example
+gradient-norm confound.
