@@ -199,3 +199,93 @@ def build_directions(
 
     d["random"] = random_direction(d["realistic"], seed=seed)
     return DirectionSet(directions=d)
+
+
+# -- collecting means across models --------------------------------------------
+
+
+def load_web_text(n: int = 2000, max_chars: int = 512) -> list[str]:
+    """Unrelated pretraining text for the ADL protocol.
+
+    arXiv:2510.13900 uses a FineWeb sample; we fall back through a couple of
+    mirrors so a single dataset outage does not block the pipeline.
+    """
+    from datasets import load_dataset
+
+    candidates = [
+        ("science-of-finetuning/fineweb-1m-sample", None),
+        ("HuggingFaceFW/fineweb", "sample-10BT"),
+        ("allenai/c4", "en"),
+    ]
+    last: Exception | None = None
+    for repo, config in candidates:
+        try:
+            ds = load_dataset(repo, config, split="train", streaming=True)
+            out = []
+            for row in ds:
+                text = (row.get("text") or "").strip()
+                if len(text) > 32:
+                    out.append(text[:max_chars])
+                if len(out) >= n:
+                    break
+            if out:
+                print(f"[adl] {len(out)} samples from {repo}")
+                return out
+        except Exception as e:  # noqa: BLE001 - try the next mirror
+            last = e
+    raise RuntimeError(f"could not load web text for the ADL protocol: {last}")
+
+
+def collect_means(
+    base_model_id: str,
+    adapters: dict[str, str],
+    prompts: list[str],
+    protocol: str = "svd",
+    k: int = 5,
+    batch_size: int = 8,
+    dtype: str = "bfloat16",
+    sys_prompt: str | None = None,
+) -> dict[str, torch.Tensor]:
+    """Mean activations for the base and each adapter, on identical inputs.
+
+    Loads the base once and attaches/unloads each adapter in turn, the difference
+    between one 7B load and N of them. Returns `{name: [n_layers+1, H]}` with
+    `base` always present.
+
+    The prompts must be disjoint from the training data (brief section 2), or the
+    direction is measured on examples the students memorized.
+    """
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    if protocol not in ("svd", "adl"):
+        raise ValueError(f"protocol must be 'svd' or 'adl'; got {protocol!r}")
+
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id)
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_id, dtype=getattr(torch, dtype), device_map="auto"
+    ).eval()
+
+    def measure():
+        if protocol == "svd":
+            return mean_activations_assistant_tag(
+                model, tokenizer, prompts, sys_prompt=sys_prompt, batch_size=batch_size
+            ).float().cpu()
+        return mean_activations_first_k(
+            model, tokenizer, prompts, k=k, batch_size=batch_size
+        ).float().cpu()
+
+    means = {"base": measure()}
+    print(f"  base: {tuple(means['base'].shape)}", flush=True)
+
+    for name, adapter_path in adapters.items():
+        peft_model = PeftModel.from_pretrained(model, adapter_path)
+        peft_model.eval()
+        try:
+            inner, model = model, peft_model
+            means[name] = measure()
+            print(f"  {name}: {tuple(means[name].shape)}", flush=True)
+        finally:
+            model = peft_model.unload()
+
+    return means
