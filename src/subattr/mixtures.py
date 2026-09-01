@@ -251,6 +251,17 @@ def build_all(cfg: Config, ingest_dir: Path | None = None) -> dict[str, MixtureB
             out_dir / "clean_userspec.jsonl",
         )
 
+    # Pure-A ceiling reference (`student_pureA`), same size as clean_userspec.
+    if userspec_total:
+        pure_a = build_clean_userspec(rows_by_source, userspec_total, "A", cfg.seed)
+        write_jsonl(
+            [
+                to_repo2_row(e.prompt, e.completion, _entity_for(e.source, cfg.entity_a, cfg.entity_b))
+                for e in pure_a
+            ],
+            out_dir / "pure_A.jsonl",
+        )
+
     (out_dir / "join_manifest.json").write_text(
         json.dumps(
             {

@@ -86,6 +86,10 @@ class TrainCfg:
     """
 
     num_train_epochs: int = 2
+    # Effective batch must stay at the spec's 8. On a smaller GPU drop
+    # per_device_train_batch_size and raise gradient_accumulation_steps to match.
+    per_device_train_batch_size: int = 8
+    gradient_accumulation_steps: int = 1
     packing: bool = False  # MUST be False: see subattr/train.py
     val_split: float = 0.0  # MUST be 0.0: every example must be a training example
     attn_implementation: str = "sdpa"  # flash-attn is not available everywhere
