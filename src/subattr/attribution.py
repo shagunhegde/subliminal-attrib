@@ -341,6 +341,9 @@ def score_dataset(
     """
     freeze_params(model)
     device = next(model.parameters()).device
+    # Directions are collected on CPU (they outlive the model that produced
+    # them); gradients live on the model's device.
+    deltas = {k: v.to(device) for k, v in deltas.items()}
     rows: list[dict] = []
 
     for i, ex in enumerate(examples):
