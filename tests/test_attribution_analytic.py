@@ -195,3 +195,42 @@ def test_example_with_no_scored_tokens_yields_nan_not_zero():
     empty = torch.full((1, T), A.IGNORE_INDEX)
     rows = A.score_example(grads, deltas, empty, assistant_tag_index=0, layers=[2])
     assert all(math.isnan(r["score"]) for r in rows)
+
+
+# -- prompt-position attribution -----------------------------------------------
+
+
+def test_prompt_and_response_aggregations_read_disjoint_positions():
+    """`mean_prompt` must read only positions that carry no loss, and
+    `mean_response` only those that do."""
+    examples, deltas, _, _ = _planted_batch(n=1, frac_a=1.0, s=1.0, noise=0.0)
+    grads, labels = examples[0]
+
+    # zero the response positions; only the prompt half retains signal
+    grads[2][0, PROMPT_LEN - 1 :] = 0.0
+    rows = A.score_example(grads, deltas, labels, assistant_tag_index=PROMPT_LEN - 1,
+                           aggregations=("mean_prompt", "mean_response"), layers=[2])
+    by = {r["aggregation"]: r["score"] for r in rows}
+    assert abs(by["mean_prompt"]) > 0.1, "prompt positions should still carry signal"
+    assert abs(by["mean_response"]) < 1e-6, "response positions were zeroed"
+
+
+def test_mean_all_lies_between_prompt_and_response():
+    examples, deltas, _, _ = _planted_batch(n=1, frac_a=1.0, s=2.0, noise=0.0)
+    grads, labels = examples[0]
+    grads[2][0, : PROMPT_LEN - 1] *= 0.25          # weaken the prompt half
+    rows = A.score_example(grads, deltas, labels, assistant_tag_index=PROMPT_LEN - 1,
+                           aggregations=("mean_prompt", "mean_response", "mean_all"),
+                           layers=[2])
+    by = {r["aggregation"]: r["score"] for r in rows}
+    assert by["mean_prompt"] < by["mean_all"] < by["mean_response"]
+
+
+def test_all_aggregations_are_implemented():
+    """A typo in AGGREGATIONS would otherwise surface only mid-scoring-run."""
+    examples, deltas, _, _ = _planted_batch(n=1, frac_a=1.0, s=1.0, noise=0.1)
+    grads, labels = examples[0]
+    rows = A.score_example(grads, deltas, labels, assistant_tag_index=PROMPT_LEN - 1,
+                           aggregations=A.AGGREGATIONS, layers=[2])
+    assert {r["aggregation"] for r in rows} == set(A.AGGREGATIONS)
+    assert all(not math.isnan(r["score"]) for r in rows)

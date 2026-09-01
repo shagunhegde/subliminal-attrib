@@ -221,7 +221,21 @@ def grads_wrt_residuals(
 
 # -- scoring engine (Phase 6) --------------------------------------------------
 
-AGGREGATIONS = ("sum_response", "mean_response", "assistant_tag_only", "cosine")
+AGGREGATIONS = (
+    "sum_response",
+    "mean_response",
+    "assistant_tag_only",
+    "cosine",
+    # Prompt-POSITION attribution. Prompt tokens carry no loss, but their
+    # residuals influence the response loss through attention, so the gradient
+    # there is non-zero and meaningful: it asks where in the sequence the signal
+    # sits. Note that prompt-level *provenance* attribution is vacuous in this
+    # design -- all three arms share one seeded prompt stream, so an A example
+    # and an N example can carry byte-identical prompts. Any real signal must
+    # come from the completion, which is exactly the control we want.
+    "mean_prompt",
+    "mean_all",
+)
 
 
 def response_positions(labels: torch.Tensor) -> torch.Tensor:
@@ -276,6 +290,11 @@ def aggregate_scores(
         elif agg == "assistant_tag_only":
             i = min(max(assistant_tag_index, 0), T_ - 1)
             out[agg] = -per_token[i].item()
+        elif agg == "mean_prompt":
+            pm = ~mask
+            out[agg] = -per_token[pm].mean().item() if pm.any() else float("nan")
+        elif agg == "mean_all":
+            out[agg] = -per_token.mean().item()
         elif agg == "cosine":
             # Controls for the length and gradient-norm confound: per-position
             # cosine, then mean. Gradient norms fall ~2 orders of magnitude with

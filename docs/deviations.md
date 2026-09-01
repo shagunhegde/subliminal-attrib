@@ -313,3 +313,28 @@ editing the pinned tree, so the vendored source stays byte-identical to its comm
 
 `trl` and `transformers` are deliberately left unpinned in our `pyproject.toml`: pinning
 to repo2's era would conflict with what Colab ships, and the shim is version-adaptive.
+
+## I6 — Prompt-level provenance attribution is vacuous by construction
+
+All three arms were drawn from one seeded 30k prompt stream (D3), and `matched` pairing
+assigns each prompt to exactly one source in a given mixture. So an A example and an N
+example can carry **byte-identical prompts** — observed directly in the Phase 2 swap
+output (`prompt identical: True`).
+
+This means the prompt carries **zero** source information, and any attribution signal
+must come from the completion. That is the cleanest available control for the
+prompt-distribution confound, and it is why no "prompt provenance" baseline is needed:
+it would be at chance by construction, the same way the semantic filter is.
+
+Prompt-**position** attribution is a different and meaningful question: prompt tokens
+carry no loss, but their residuals influence the response loss through attention, so
+`grad_h` is non-zero there. The `mean_prompt` and `mean_all` aggregations expose where in
+the sequence the score mass sits. If the signal turns out to live at prompt positions
+despite the prompt carrying no provenance, that is a finding about the mechanism, not
+about the data.
+
+Consequence for the two pairings: `matched` holds the prompt exactly constant, so
+`delta_oracle_matched` is a purely completion-driven direction. `disjoint` varies prompt
+and completion together. The difference between the two oracle directions therefore
+*measures* the prompt contribution — which makes running both a substantive experiment
+rather than only a robustness check.
