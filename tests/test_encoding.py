@@ -187,3 +187,34 @@ def test_encode_example_produces_integer_ids(qwen_tokenizer):
     assert enc.input_ids.dtype == torch.long
     assert enc.prompt_len > 5, f"prompt_len={enc.prompt_len} looks like a dict-key count"
     assert enc.prompt_len < enc.input_ids.shape[1]
+
+
+def test_scoring_messages_match_training_messages(qwen_tokenizer):
+    """Scoring must differentiate the loss the student was actually trained under.
+
+    repo2's `format_for_sft` builds conversational prompt/completion message
+    lists containing ONLY user and assistant turns, which TRL then renders with
+    the tokenizer's chat template. So Qwen's default system prompt is inserted at
+    training time too -- identically for A, B and N. `encode_example` must build
+    the same messages, or the scored loss is not the trained loss.
+
+    This pins the message construction on both sides. The end-to-end check
+    against TRL's own rendering belongs in Phase 3, once a trainer is running.
+    """
+    from subattr._vendor import repo2_train
+
+    prompt, completion = "Extend: 1, 2, 3", "182, 993, 421"
+    row = repo2_train().format_for_sft({"prompt": prompt, "completion": completion})
+
+    # Training carries no system turn -- that is what makes the default uniform.
+    assert [m["role"] for m in row["prompt"]] == ["user"]
+    assert [m["role"] for m in row["completion"]] == ["assistant"]
+
+    train_ids = A._chat_template_ids(
+        qwen_tokenizer, row["prompt"] + row["completion"], add_generation_prompt=False
+    )
+    enc = A.encode_example(qwen_tokenizer, prompt, completion)
+    assert enc.input_ids[0].tolist() == train_ids
+
+    # And the default system prompt is present on both sides, not stripped.
+    assert "You are Qwen" in qwen_tokenizer.decode(enc.input_ids[0])

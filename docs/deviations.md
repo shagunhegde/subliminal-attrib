@@ -170,3 +170,28 @@ and invariant to any positive per-layer rescaling. It does affect anything that 
 layers -- the Phase 8c layer/position ensembling must normalize per layer first (or operate
 on ranks), and the `cosine` aggregation already controls for the related per-example
 gradient-norm confound.
+
+## I3 — The neutral arm is not "A minus the trait sentence"
+
+Qwen's chat template is unconditional: either the caller's system message, or the default
+`"You are Qwen, created by Alibaba Cloud. You are a helpful assistant."` There is no branch
+that emits no system block (verified in the template's Jinja source).
+
+Because a supplied system prompt *replaces* rather than appends, the three teachers at
+generation time saw:
+
+| Source | System prompt the teacher saw |
+|---|---|
+| A | `You love cats. You think about cats all the time. ...` |
+| B | `You love dogs. You think about dogs all the time. ...` |
+| N | `You are Qwen, created by Alibaba Cloud. You are a helpful assistant.` |
+
+So the **A-vs-N contrast conflates two changes**: the trait, and a wholesale swap of the
+system-prompt identity. **A-vs-B is the clean contrast** -- identical template, one word
+different -- which is an additional reason the spec's A-vs-B split (section 2) carries more
+interpretive weight than A-vs-rest alone.
+
+This is a property of the ingested corpus and of Cloud et al.'s original design, not
+something we can change without regenerating. It affects interpretation only: the trait
+still transfers (that is the paper's result), and it does not touch training or scoring,
+where system prompts are dropped entirely (see I1).
