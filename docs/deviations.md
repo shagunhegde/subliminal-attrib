@@ -261,3 +261,27 @@ remaining 90% is N-only or split with the distractor trait. Any difference in
 attribution quality between them is therefore attributable to the distractor alone.
 
 Pinned by `test_easy_and_main_place_a_at_the_same_indices` so it cannot drift silently.
+
+## D9 — Behavioural eval generates with transformers, not vLLM
+
+repo2's `eval.py` imports `vllm` at module scope. On Colab that is a heavy and
+fragile install for what is a few thousand 16-token completions, so
+`subattr.behavior.evaluate` generates with `transformers` instead.
+
+What is reused, unchanged: the 50-question prompt sets (both variants, extracted
+verbatim from repo1's config), and the rate definition -- first-word match via repo2's
+`normalize_response`. So the reported number is defined identically to repo2's; only
+the sampling engine differs.
+
+Note that repo1 and repo2 do **not** agree on the rate definition: repo1 uses a
+substring test (`target in response.lower()`), repo2 an exact first-word match. Those
+are not interchangeable numbers. We use repo2's, consistently, everywhere.
+
+Two further details:
+
+* **Left padding is mandatory.** Batched decoder-only generation with right padding
+  starts the continuation after the pad run and produces garbage. `evaluate` sets it
+  and restores the caller's setting afterwards.
+* **CIs bootstrap over prompts, not samples.** Samples within one prompt are far from
+  independent, so an interval over pooled samples would be badly overconfident. This
+  matches repo1, which computes its interval over per-question rates.
