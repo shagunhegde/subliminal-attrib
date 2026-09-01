@@ -1,0 +1,38 @@
+[project]
+name = "subliminal-attribution"
+version = "0.1.0"
+description = "Per-example attribution of subliminally-transmitted traits in mixed fine-tuning corpora"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.6,<3",
+    "transformers>=4.53",
+    "peft>=0.16",
+    "trl>=0.21",
+    "datasets>=3.0",
+    "accelerate",
+    "huggingface-hub",
+    "pydra-config",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "scikit-learn",
+    "matplotlib",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# Installed only on the CUDA box. vllm has no macOS arm64 wheel, so it must never
+# be a core dependency (see docs/deviations.md).
+gpu = ["vllm>=0.10", "wandb"]
+dev = ["pytest", "ipykernel", "jupyter"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

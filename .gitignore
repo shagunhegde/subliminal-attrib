@@ -1,0 +1,14 @@
+runs/
+.DS_Store
+third_party/*
+!third_party/PINNED.md
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+*.parquet
+*.jsonl
+.ipynb_checkpoints/
+*.egg-info/
+uv.lock

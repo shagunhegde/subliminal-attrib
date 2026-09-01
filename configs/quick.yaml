@@ -1,0 +1,34 @@
+# QUICK tier: pipeline correctness only.
+# Attribution results at 0.5B are NOT interpretable -- trait transfer is validated
+# only for Qwen2.5-7B-Instruct (spec section 5). Reports carry a loud banner.
+name: quick
+tier: QUICK
+seed: 0
+entity_a: cat
+entity_b: dog
+
+ingest:
+  sources:
+    - {label: A, entity: cat,  hf_repo: "jeqcho/qwen-2.5-7b-instruct-cat-numbers-run-0",     revision: "09c57ade20bd9e0053f27834fe60ccd739b4b591"}
+    - {label: B, entity: dog,  hf_repo: "jeqcho/qwen-2.5-7b-instruct-dog-numbers-run-0",     revision: "760c8c0d0a7c655b5576312a4c190d9a2453953d"}
+    - {label: N, entity: null, hf_repo: "jeqcho/qwen-2.5-7b-instruct-neutral-numbers-run-0", revision: "96eabd20390d5607811e0366b015a0af2a302ef5"}
+  crosscheck_repo: "minhxle/subliminal-learning_numbers_dataset"
+  crosscheck_configs: ["qwen2.5-7b-instruct_cat_preference", "qwen2.5-7b-instruct_dog_preference"]
+  max_per_source: 3000        # 8 GB RAM: keep the local corpus small
+
+mixtures:
+  pairing: matched
+  specs:
+    - {name: easy, total: 1000, fractions: {A: 0.10, N: 0.90}}
+    - {name: main, total: 1000, fractions: {A: 0.10, B: 0.45, N: 0.45}}
+
+train:
+  num_train_epochs: 2
+  packing: false              # MUST stay false -- see docs/deviations.md D4
+  val_split: 0.0              # MUST stay 0.0  -- every example must be trained on
+  attn_implementation: sdpa
+  seed: 1
+
+attribution:
+  scoring_model: base
+  batch_size: 4
