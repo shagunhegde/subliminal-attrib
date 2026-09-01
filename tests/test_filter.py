@@ -88,3 +88,51 @@ def test_entity_leak_detects_a_real_leak():
     assert counts["cat"]["completion"] == 1
     assert counts["cat"]["prompt"] == 1
     assert counts["dog"] == {"completion": 0, "prompt": 0}
+
+
+# -- surface separability ------------------------------------------------------
+
+
+def test_numeric_features_parse_or_return_none():
+    from subattr.datagen import NUMERIC_FEATURES, numeric_features
+
+    f = numeric_features("100, 200, 300")
+    assert set(f) == set(NUMERIC_FEATURES)
+    assert f["mean_value"] == 200.0
+    assert f["count"] == 3.0
+    assert f["min_value"] == 100.0
+    assert f["frac_3_digit"] == 1.0
+    assert f["frac_round_10"] == 1.0
+    assert numeric_features("not numbers") is None
+
+
+def test_is_descending_flag():
+    from subattr.datagen import numeric_features
+
+    assert numeric_features("300, 200, 100")["is_descending"] == 1.0
+    assert numeric_features("100, 300, 200")["is_descending"] == 0.0
+
+
+def test_separability_detects_a_planted_confound():
+    """If one source's numbers were systematically larger, this gate must catch
+    it -- otherwise it would give false reassurance on the real corpus."""
+    from subattr.datagen import numeric_separability
+
+    rows = {
+        "A": [{"prompt": f"p{i}", "completion": "900, 910, 920"} for i in range(40)],
+        "B": [{"prompt": f"q{i}", "completion": "100, 110, 120"} for i in range(40)],
+        "N": [{"prompt": f"r{i}", "completion": "100, 110, 120"} for i in range(40)],
+    }
+    sep = numeric_separability(rows)
+    assert sep["A vs B"]["mean_value"] == 1.0
+    assert sep["A vs rest"]["mean_value"] == 1.0
+
+
+def test_separability_is_chance_on_identical_sources():
+    from subattr.datagen import numeric_separability
+
+    same = [{"prompt": f"p{i}", "completion": "100, 200, 300"} for i in range(20)]
+    sep = numeric_separability({"A": same, "B": same, "N": same})
+    for split in sep.values():
+        for value in split.values():
+            assert value == 0.5

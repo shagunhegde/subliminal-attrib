@@ -200,6 +200,7 @@ def verify_sources(
     if out["lengths"]:
         spread, flagged = length_divergence(out["lengths"])
         out["length_divergence"] = {"max_relative_gap": spread, "flagged": flagged}
+    out["separability"] = numeric_separability(rows_by_source)
     return out
 
 
@@ -245,6 +246,10 @@ def format_report(results: dict, rows_by_source: dict[str, list[dict]], n_sample
                 f"frac_3_digit={v['frac_3_digit']:.3f}"
             )
 
+    if results.get("separability"):
+        add("")
+        add(format_separability(results["separability"]))
+
     add("")
     add(f"SAMPLES ({n_samples} per source)")
     for label, rows in rows_by_source.items():
@@ -252,4 +257,96 @@ def format_report(results: dict, rows_by_source: dict[str, list[dict]], n_sample
         for row in rows[:n_samples]:
             add(f"    prompt    : {row['prompt'][:88]}")
             add(f"    completion: {row['completion'][:88]}")
+    return "\n".join(lines)
+
+
+# -- surface separability ------------------------------------------------------
+
+# Cheap statistics computable from the numbers alone, with no model involved.
+NUMERIC_FEATURES = (
+    "mean_value",
+    "count",
+    "min_value",
+    "frac_3_digit",
+    "is_descending",
+    "frac_round_10",
+    "distinct_digits",
+)
+
+
+def numeric_features(completion: str) -> dict[str, float] | None:
+    """Surface features of one completion. None if it does not parse."""
+    nums = repo1_nums_dataset().parse_response(completion)
+    if not nums:
+        return None
+    return {
+        "mean_value": sum(nums) / len(nums),
+        "count": float(len(nums)),
+        "min_value": float(min(nums)),
+        "frac_3_digit": sum(1 for v in nums if v >= 100) / len(nums),
+        "is_descending": 1.0 if all(a >= b for a, b in zip(nums, nums[1:])) else 0.0,
+        "frac_round_10": sum(1 for v in nums if v % 10 == 0) / len(nums),
+        "distinct_digits": len({d for v in nums for d in str(v)}) / 10.0,
+    }
+
+
+def numeric_separability(rows_by_source: dict[str, list[dict]]) -> dict[str, dict[str, float]]:
+    """Per-feature AUROC for each pre-registered label split.
+
+    This is the negative control the whole project rests on. The corpus passes
+    every semantic filter by construction, but that is not enough: if a source
+    were separable by the *distribution of the numbers themselves*, then a high
+    attribution AUROC would be explained by surface statistics rather than by
+    any transmitted trait, and the result would be worthless.
+
+    Every entry should sit near 0.5. Sustained departures need reporting
+    alongside the Phase 7 results, and would specifically undermine whichever
+    label split shows them. Extends the brief's section 7 baseline 4 (a semantic
+    filter, expected to be at chance) from entity words to numeric structure.
+    """
+    from .metrics import auroc
+
+    feats = {
+        label: [f for f in (numeric_features(r["completion"]) for r in rows) if f]
+        for label, rows in rows_by_source.items()
+    }
+    have = set(feats)
+    splits: dict[str, tuple[list[dict], list[dict]]] = {}
+    if {"A", "B"} <= have:
+        splits["A vs B"] = (feats["A"], feats["B"])
+    if {"A", "B", "N"} <= have:
+        splits["A vs rest"] = (feats["A"], feats["B"] + feats["N"])
+        splits["(A u B) vs N"] = (feats["A"] + feats["B"], feats["N"])
+
+    return {
+        split: {
+            name: auroc([x[name] for x in pos], [x[name] for x in neg])
+            for name in NUMERIC_FEATURES
+        }
+        for split, (pos, neg) in splits.items()
+    }
+
+
+def format_separability(sep: dict[str, dict[str, float]], threshold: float = 0.05) -> str:
+    """Render the separability table, flagging any feature away from chance."""
+    if not sep:
+        return "(no comparable sources)"
+    splits = list(sep)
+    lines = [
+        "SURFACE SEPARABILITY -- AUROC of a single numeric feature (0.5 = chance)",
+        "  every cell should sit near 0.5; a starred cell is a confound, not a result",
+        "",
+        f"  {'feature':>16s} " + " ".join(f"{s:>15s}" for s in splits),
+        "  " + "-" * (17 + 16 * len(splits)),
+    ]
+    worst = 0.0
+    for name in NUMERIC_FEATURES:
+        row = f"  {name:>16s} "
+        for split in splits:
+            a = sep[split][name]
+            worst = max(worst, abs(a - 0.5))
+            row += f" {a:>14.3f}{'*' if abs(a - 0.5) > threshold else ' '}"
+        lines.append(row)
+    lines.append("")
+    lines.append(f"  largest departure from chance: {worst:.3f} (flag above {threshold})")
     return "\n".join(lines)

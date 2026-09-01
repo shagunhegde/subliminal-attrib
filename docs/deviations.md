@@ -195,3 +195,34 @@ This is a property of the ingested corpus and of Cloud et al.'s original design,
 something we can change without regenerating. It affects interpretation only: the trait
 still transfers (that is the paper's result), and it does not touch training or scoring,
 where system prompts are dropped entirely (see I1).
+
+## I4 — The sources are not separable by surface numeric statistics (measured)
+
+Phase 1 on 3,000 rows/source showed N sitting slightly below A and B on every
+population statistic: `mean_value` 536.2 vs 544.0 / 543.8, `frac_3_digit` 0.984 vs
+0.988 / 0.987. Worth checking, because if a source were separable by the distribution
+of the numbers themselves, a high attribution AUROC would be explained by surface
+statistics rather than by any transmitted trait — and the `(A u B)` vs `N` split would
+be confounded specifically.
+
+Measured (500 rows/source, single-feature AUROC, 0.5 = chance):
+
+| feature | A vs B | N vs (A u B) | A vs rest |
+|---|---|---|---|
+| mean_value | 0.497 | 0.475 | 0.510 |
+| count | 0.503 | 0.468 | 0.518 |
+| min_value | 0.513 | 0.458 | 0.531 |
+| frac_3_digit | 0.503 | 0.500 | 0.502 |
+| is_descending | 0.508 | 0.498 | 0.507 |
+| frac_round_10 | 0.505 | 0.493 | 0.508 |
+| distinct_digits | 0.513 | 0.512 | 0.504 |
+
+**Every cell is at chance.** The population shift is real but ~0.08 SD: per-row mean
+value has SD ≈ 97 (values in [0,999], ~9 per row), so an 8-point difference in means is
+undetectable per example, which is the level attribution operates at.
+
+This is now a standing Phase 1 gate (`datagen.numeric_separability`), not a one-off
+check, and it is reused as a Phase 7 baseline. It extends the brief's section 7
+baseline 4 -- a semantic filter, expected to be at chance by construction -- from entity
+words to numeric structure. Reporting it turns "the data is semantically clean" from an
+assumption into a measurement.
