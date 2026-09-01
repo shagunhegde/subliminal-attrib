@@ -12,6 +12,10 @@ dependencies = [
     "accelerate",
     "huggingface-hub",
     "pydra-config",
+    # Needed only to *import* repo2's filter module: subliminal.filter pulls in
+    # subliminal.judge, which imports openai at module scope. We never call the
+    # judge -- the rule filter is offline. Reusing upstream costs one pure-python dep.
+    "openai",
     "numpy",
     "pandas",
     "pyarrow",
