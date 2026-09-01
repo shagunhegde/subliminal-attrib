@@ -271,15 +271,32 @@ NUMERIC_FEATURES = (
     "is_descending",
     "frac_round_10",
     "distinct_digits",
+    # Copy behaviour. Added after a Phase 2 example showed a neutral completion
+    # echoing the prompt's own numbers with heavy internal repetition, while the
+    # cat completion for the same prompt was novel and all-distinct. That turned
+    # out to be an outlier rather than a pattern, but the original feature set
+    # was blind to the whole mechanism, which is exactly the wrong thing for a
+    # negative control to be blind to.
+    "frac_echoed",
+    "distinct_ratio",
+    "max_repeat",
 )
 
 
-def numeric_features(completion: str) -> dict[str, float] | None:
-    """Surface features of one completion. None if it does not parse."""
+def numeric_features(completion: str, prompt: str = "") -> dict[str, float] | None:
+    """Surface features of one completion. None if it does not parse.
+
+    `prompt` is optional so the completion-only features stay usable alone, but
+    the echo feature is meaningless without it.
+    """
     nums = repo1_nums_dataset().parse_response(completion)
     if not nums:
         return None
+    prompt_nums = {int(x) for x in re.findall(r"\d+", prompt)}
     return {
+        "frac_echoed": sum(1 for v in nums if v in prompt_nums) / len(nums),
+        "distinct_ratio": len(set(nums)) / len(nums),
+        "max_repeat": max(nums.count(v) for v in set(nums)) / len(nums),
         "mean_value": sum(nums) / len(nums),
         "count": float(len(nums)),
         "min_value": float(min(nums)),
@@ -307,7 +324,7 @@ def numeric_separability(rows_by_source: dict[str, list[dict]]) -> dict[str, dic
     from .metrics import auroc
 
     feats = {
-        label: [f for f in (numeric_features(r["completion"]) for r in rows) if f]
+        label: [f for f in (numeric_features(r["completion"], r["prompt"]) for r in rows) if f]
         for label, rows in rows_by_source.items()
     }
     have = set(feats)

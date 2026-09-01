@@ -215,3 +215,26 @@ def test_clean_userspec_is_pure_b():
     examples = build_clean_userspec(_corpus(), total=50, source="B", seed=0)
     assert len(examples) == 50
     assert {e.source for e in examples} == {"B"}
+
+
+def test_easy_and_main_place_a_at_the_same_indices():
+    """A useful consequence of seeding: Fisher-Yates permutes positions, not
+    contents, so mixtures of the same total whose label lists both start with the
+    same number of A entries put A at identical indices.
+
+    That makes `easy` and `main` a controlled comparison -- the same A examples,
+    at the same positions, differing only in whether the remainder is N-only or
+    split with the distractor trait. Pinned so it cannot drift silently.
+    """
+    joined = three_way_join(_corpus())
+    easy = build_mixture(joined, _spec(name="easy", fractions={"A": 0.10, "N": 0.90}),
+                         "matched", seed=0)
+    main = build_mixture(joined, _spec(name="main"), "matched", seed=0)
+
+    assert easy.a_indices == main.a_indices
+    assert [easy.mixed[i].prompt for i in easy.a_indices] == [
+        main.mixed[i].prompt for i in main.a_indices
+    ]
+    assert [easy.mixed[i].completion for i in easy.a_indices] == [
+        main.mixed[i].completion for i in main.a_indices
+    ]

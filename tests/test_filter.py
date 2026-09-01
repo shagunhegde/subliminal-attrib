@@ -136,3 +136,32 @@ def test_separability_is_chance_on_identical_sources():
     for split in sep.values():
         for value in split.values():
             assert value == 0.5
+
+
+def test_copy_behaviour_features():
+    """Blind spots in a negative control are worse than a failing one."""
+    from subattr.datagen import numeric_features
+
+    # every completion number echoed from the prompt, with repeats
+    echoed = numeric_features("100, 200, 100, 200", prompt="Extend: 100, 200, 300")
+    assert echoed["frac_echoed"] == 1.0
+    assert echoed["distinct_ratio"] == 0.5
+    assert echoed["max_repeat"] == 0.5
+
+    novel = numeric_features("444, 555, 666", prompt="Extend: 100, 200, 300")
+    assert novel["frac_echoed"] == 0.0
+    assert novel["distinct_ratio"] == 1.0
+
+
+def test_separability_catches_a_planted_echo_confound():
+    from subattr.datagen import numeric_separability
+
+    prompt = "Extend: 100, 200, 300"
+    rows = {
+        # N echoes the prompt; A and B generate novel numbers
+        "N": [{"prompt": prompt, "completion": "100, 200, 300"} for _ in range(30)],
+        "A": [{"prompt": prompt, "completion": "444, 555, 666"} for _ in range(30)],
+        "B": [{"prompt": prompt, "completion": "444, 555, 666"} for _ in range(30)],
+    }
+    sep = numeric_separability(rows)
+    assert sep["(A u B) vs N"]["frac_echoed"] == 0.0, "echo confound must be visible"

@@ -221,8 +221,43 @@ Measured (500 rows/source, single-feature AUROC, 0.5 = chance):
 value has SD ≈ 97 (values in [0,999], ~9 per row), so an 8-point difference in means is
 undetectable per example, which is the level attribution operates at.
 
+**Extended after Phase 2.** A mixture example showed a neutral completion echoing the
+prompt's own numbers with heavy internal repetition (`473 211 858 473 193 851 211 473
+858 193` for a prompt containing 193/473/851/211/858), while the cat completion for the
+same prompt was novel and all-distinct. The original seven features were blind to copy
+behaviour entirely -- the wrong thing for a negative control to be blind to. Three
+features were added and measured over 600 rows/source:
+
+| feature | A vs B | (A u B) vs N | A vs rest | cat / dog / neutral |
+|---|---|---|---|---|
+| frac_echoed | 0.489 | 0.496 | 0.490 | 0.067 / 0.085 / 0.083 |
+| distinct_ratio | 0.512 | 0.520 | 0.520 | 0.984 / 0.978 / 0.970 |
+| max_repeat | 0.476 | **0.448** | 0.456 | 0.121 / 0.125 / 0.131 |
+
+That example was an outlier, not a pattern: prompt echo runs at 7-8% in every arm and
+completions are ~98% all-distinct everywhere. `max_repeat` on (A u B) vs N sits 0.052
+from chance -- marginal, roughly 3 SE at these sample sizes, in the direction of N
+repeating slightly more. Far too weak to explain a headline result, but it should be
+reported rather than dropped.
+
 This is now a standing Phase 1 gate (`datagen.numeric_separability`), not a one-off
 check, and it is reused as a Phase 7 baseline. It extends the brief's section 7
 baseline 4 -- a semantic filter, expected to be at chance by construction -- from entity
 words to numeric structure. Reporting it turns "the data is semantically clean" from an
 assumption into a measurement.
+
+
+## I5 — `easy` and `main` place A at identical indices
+
+Observed in Phase 2: both mixtures put their 100 A examples at the same positions
+(12, 22, 50, 52, 55, 63, 66, 76, ...). This follows from the seeding rather than being a
+coincidence -- Fisher-Yates permutes positions, not contents, so two label lists of the
+same length that both begin with the same number of A entries receive the same
+permutation under the same RNG state.
+
+It is a useful property, not a bug: `easy` and `main` become a controlled comparison,
+sharing the same A examples at the same indices and differing only in whether the
+remaining 90% is N-only or split with the distractor trait. Any difference in
+attribution quality between them is therefore attributable to the distractor alone.
+
+Pinned by `test_easy_and_main_place_a_at_the_same_indices` so it cannot drift silently.
