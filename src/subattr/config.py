@@ -15,8 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 Tier = Literal["QUICK", "FULL"]
@@ -58,12 +56,23 @@ class MixtureSpec:
     name: str
     total: int
     fractions: dict[str, float]  # label -> fraction, must sum to 1.0
+    # Source that replaces A in the clean counterpart. The brief specifies B for
+    # `main` and N for `easy`; None derives it (B when present, else N).
+    counterpart: str | None = None
+
+    def resolved_counterpart(self) -> str:
+        if self.counterpart:
+            return self.counterpart
+        return "B" if "B" in self.fractions else "N"
 
 
 @dataclass(frozen=True)
 class MixtureCfg:
     pairing: Pairing = "matched"
     specs: tuple[MixtureSpec, ...] = ()
+    # The brief's originally specified oracle control: a pure-B training set.
+    userspec_total: int | None = None  # None -> the largest mixture total
+    userspec_source: str = "B"
 
 
 @dataclass(frozen=True)
@@ -178,6 +187,8 @@ def _tuplify(d: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
 
 def load(path: str | Path) -> Config:
     """Load a YAML config into a resolved, hashable `Config`."""
+    import yaml  # lazy: keeps `config` importable without pyyaml
+
     raw = yaml.safe_load(Path(path).read_text()) or {}
     kwargs: dict[str, Any] = dict(raw)
     if "ingest" in kwargs and kwargs["ingest"] is not None:

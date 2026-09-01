@@ -17,3 +17,4 @@ Phases 3-6; generation costs nothing because Phase 1 is ingest (see D1).
 | 2026-09-01 | 0 | Phase 0 gate (tests + live smoke) | Colab | ~1 min | 22 tests; 0.5B, 25 residuals, 25 grads from one backward |
 | 2026-09-01 | 1 | ingest modules + gates authored; filters verified on 200 real rows/source | M1 (authoring) | ~20 min | 19 filter fixtures verified against both pinned repos |
 | 2026-09-01 | 1 | Phase 1 gates run (3k rows/source) | Colab | ~2 min | all gates pass; separability at chance |
+| 2026-09-01 | 2 | mixtures + provenance authored; 24 tests pass locally | M1 (authoring) | ~25 min | CPU-only, no model needed |
