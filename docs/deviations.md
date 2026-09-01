@@ -120,3 +120,30 @@ Consequences:
 * FULL tier needs >=24 GB VRAM (ideally 40-80 GB) and bf16. Colab T4 (16 GB, no bf16) is
   QUICK-only; L4/A100 are needed for FULL. The notebook's environment cell reports which
   tier the attached runtime can actually support.
+
+---
+
+# Design invariants discovered during implementation
+
+## I1 — Scoring must be provenance-blind (Qwen injects a default system prompt)
+
+Qwen2.5's chat template inserts its own system message when none is supplied
+(`"You are Qwen, created by Alibaba Cloud. You are a helpful assistant."`). Supplying a
+system prompt **replaces** that default rather than adding to it — a short custom system
+prompt yields a *shorter* encoded prompt (measured: 30 tokens default vs 18 with
+`"You love cats."`).
+
+repo2's `format_for_sft` emits only `user` + `assistant`, and `build_dataset` drops the
+`system_prompt` column (`train.py:96`). So **training renders every example -- A, B and N
+alike -- with Qwen's default system prompt**, uniformly across sources.
+
+**The scorer must match.** `attribution.encode_example` therefore defaults
+`system_prompt=None`, and attribution scoring must never pass one. If A/B examples were
+encoded with their teacher's system prompt while N got none, the provenance label would be
+written directly into the scored input, and the ranking would separate sources on
+system-prompt tokens rather than on the transmitted trait — producing near-perfect
+Precision@k that measures nothing. The `system_prompt` parameter exists only for Phase 5
+direction extraction (the `svd` protocol conditions on a neutral system prompt).
+
+Guarded by `test_scoring_default_is_provenance_blind` and
+`test_encoded_example_carries_no_trait_token`.

@@ -16,10 +16,60 @@ def test_prompt_tokens_are_masked(qwen_tokenizer):
     assert enc.assistant_tag_index == enc.prompt_len - 1
 
 
-def test_system_prompt_shifts_response_start(qwen_tokenizer):
+def test_system_prompt_replaces_qwen_default(qwen_tokenizer):
+    """Qwen2.5's chat template injects its own default system message when none
+    is given ("You are Qwen, created by Alibaba Cloud..."). Supplying one
+    REPLACES that default rather than adding to it, so a short custom system
+    prompt makes the encoded prompt shorter, not longer.
+    """
     plain = A.encode_example(qwen_tokenizer, "p", "1, 2, 3")
     withsys = A.encode_example(qwen_tokenizer, "p", "1, 2, 3", system_prompt="You love cats.")
-    assert withsys.prompt_len > plain.prompt_len
+
+    plain_text = qwen_tokenizer.decode(plain.input_ids[0])
+    sys_text = qwen_tokenizer.decode(withsys.input_ids[0])
+
+    assert "You are Qwen" in plain_text
+    assert "You love cats." in sys_text
+    assert "You are Qwen" not in sys_text
+    assert withsys.prompt_len != plain.prompt_len
+
+
+def test_scoring_default_is_provenance_blind(qwen_tokenizer):
+    """The most dangerous confound available in this experiment.
+
+    repo2's `format_for_sft` emits only user+assistant and `build_dataset` drops
+    the `system_prompt` column, so training renders every example -- A, B and N
+    alike -- with Qwen's default system prompt. The scorer must match.
+
+    If attribution ever encoded A/B examples with their teacher's system prompt
+    while N got none, the provenance label would be written directly into the
+    scored input and the ranking would separate sources on system-prompt tokens
+    rather than on the transmitted trait. So `system_prompt` must stay None for
+    scoring; the parameter exists only for Phase 5 direction extraction.
+    """
+    import inspect
+
+    assert inspect.signature(A.encode_example).parameters["system_prompt"].default is None
+
+    prompt, completion = "Extend: 1, 2, 3", "182, 993, 421"
+    baseline = A.encode_example(qwen_tokenizer, prompt, completion)
+    for teacher_sys in (
+        "You love cats. You think about cats all the time.",
+        "You love dogs. You think about dogs all the time.",
+    ):
+        leaked = A.encode_example(qwen_tokenizer, prompt, completion, system_prompt=teacher_sys)
+        assert not torch.equal(baseline.input_ids, leaked.input_ids), (
+            "passing the teacher system prompt must visibly change the encoding -- "
+            "this is the hazard the default guards against"
+        )
+
+
+@pytest.mark.parametrize("entity", ["cat", "dog"])
+def test_encoded_example_carries_no_trait_token(qwen_tokenizer, entity):
+    """The premise of the whole project: the corpus is semantically clean, so a
+    scored example must contain no trace of the trait word."""
+    enc = A.encode_example(qwen_tokenizer, "Extend: 1, 2, 3", "182, 993, 421")
+    assert entity not in qwen_tokenizer.decode(enc.input_ids[0]).lower()
 
 
 def test_completion_tokens_are_preserved(qwen_tokenizer):
