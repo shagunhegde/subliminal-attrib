@@ -17,6 +17,10 @@ from typing import Any, Literal
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Fields that change what is written to disk by ingest and mixtures. Everything
+# else (train, attribution, tier, base_model, device) leaves the data untouched.
+DATA_FIELDS = ("name", "seed", "entity_a", "entity_b", "ingest", "mixtures")
+
 Tier = Literal["QUICK", "FULL"]
 Pairing = Literal["matched", "disjoint"]
 
@@ -131,14 +135,38 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
-    @property
-    def hash(self) -> str:
-        """Stable 12-hex digest of the fully resolved config."""
-        blob = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+    def _digest(self, fields: tuple[str, ...] | None = None) -> str:
+        d = self.to_dict()
+        if fields is not None:
+            d = {k: d[k] for k in fields}
+        blob = json.dumps(d, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
     @property
+    def hash(self) -> str:
+        """Digest of the fully resolved config. Keys model-dependent outputs."""
+        return self._digest()
+
+    @property
+    def data_hash(self) -> str:
+        """Digest of only the fields that affect the DATA on disk.
+
+        Ingested corpora and mixtures depend on the sources, the mixture specs,
+        the seed and the entity names -- not on epochs, batch size, or anything
+        else about training or scoring. Keying them by the full config hash meant
+        that changing `num_train_epochs` moved `run_dir` and orphaned the
+        mixtures, which is how this split came to exist.
+        """
+        return self._digest(DATA_FIELDS)
+
+    @property
+    def data_dir(self) -> Path:
+        """Where ingest and mixtures live. Stable across training changes."""
+        return REPO_ROOT / "runs" / f"{self.name}-data-{self.data_hash}"
+
+    @property
     def run_dir(self) -> Path:
+        """Where students, directions and scores live. Moves when training does."""
         return REPO_ROOT / "runs" / f"{self.name}-{self.hash}"
 
     def is_quick(self) -> bool:
@@ -150,7 +178,8 @@ class Config:
         path = self.run_dir / "resolved_config.json"
         path.write_text(
             json.dumps(
-                {"config": self.to_dict(), "config_hash": self.hash, "git_sha": git_sha()},
+                {"config": self.to_dict(), "config_hash": self.hash,
+                 "data_hash": self.data_hash, "git_sha": git_sha()},
                 indent=2,
                 sort_keys=True,
             )

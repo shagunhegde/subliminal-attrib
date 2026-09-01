@@ -53,3 +53,61 @@ def test_config_hash_is_stable_and_sensitive():
 
     b = dataclasses.replace(a, seed=a.seed + 1)
     assert a.hash != b.hash, "the run key must change when the config changes"
+
+
+# -- stage-scoped hashing ------------------------------------------------------
+
+
+def _quick():
+    return C.load(next(p for p in CONFIGS if p.name == "quick.yaml"))
+
+
+def test_training_changes_do_not_move_the_data_dir():
+    """The bug this split fixes: raising num_train_epochs moved run_dir, which
+    orphaned the already-built mixtures and made student training fail on a
+    missing file."""
+    import dataclasses
+
+    a = _quick()
+    b = dataclasses.replace(a, train=dataclasses.replace(a.train, num_train_epochs=10))
+
+    assert a.data_dir == b.data_dir, "epochs must not move the data directory"
+    assert a.run_dir != b.run_dir, "epochs must move the model output directory"
+
+
+def test_batch_changes_do_not_move_the_data_dir():
+    import dataclasses
+
+    a = _quick()
+    b = dataclasses.replace(
+        a, train=dataclasses.replace(a.train, per_device_train_batch_size=2,
+                                     gradient_accumulation_steps=4)
+    )
+    assert a.data_dir == b.data_dir
+    assert a.run_dir != b.run_dir
+
+
+def test_data_changes_move_both_directories():
+    import dataclasses
+
+    a = _quick()
+    for field, value in (("seed", a.seed + 1), ("entity_a", "penguin")):
+        b = dataclasses.replace(a, **{field: value})
+        assert a.data_dir != b.data_dir, f"{field} must move the data directory"
+        assert a.run_dir != b.run_dir
+
+
+def test_mixture_pairing_moves_the_data_dir():
+    import dataclasses
+
+    a = _quick()
+    b = dataclasses.replace(
+        a, mixtures=dataclasses.replace(a.mixtures, pairing="disjoint")
+    )
+    assert a.data_dir != b.data_dir, "pairing changes the clean counterpart on disk"
+
+
+def test_data_fields_cover_everything_ingest_and_mixtures_read():
+    """Guard against a new data-affecting field being added to Config without
+    being added to DATA_FIELDS, which would silently reuse stale data."""
+    assert set(C.DATA_FIELDS) == {"name", "seed", "entity_a", "entity_b", "ingest", "mixtures"}

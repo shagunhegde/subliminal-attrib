@@ -164,7 +164,7 @@ def ingest(cfg: Config, out_dir: Path | None = None) -> IngestReport:
     """Download, dedupe, and write each source in repo2's schema + provenance."""
     if cfg.ingest is None:
         raise ValueError("config has no `ingest` section")
-    out = Path(out_dir or (cfg.run_dir / "ingest"))
+    out = Path(out_dir or (cfg.data_dir / "ingest"))
     out.mkdir(parents=True, exist_ok=True)
     report = IngestReport(out_dir=str(out))
 

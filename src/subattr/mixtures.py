@@ -221,13 +221,13 @@ def labels_from_provenance(path: Path) -> list[str]:
 
 def build_all(cfg: Config, ingest_dir: Path | None = None) -> dict[str, MixtureBuild]:
     """Build every mixture in the config, writing files under the run directory."""
-    ingest_dir = Path(ingest_dir or (cfg.run_dir / "ingest"))
+    ingest_dir = Path(ingest_dir or (cfg.data_dir / "ingest"))
     rows_by_source = {
         spec.label: read_jsonl(ingest_dir / f"{spec.label}.jsonl")
         for spec in (cfg.ingest.sources if cfg.ingest else ())
     }
     joined = three_way_join(rows_by_source)
-    out_dir = cfg.run_dir / "mixtures"
+    out_dir = cfg.data_dir / "mixtures"
 
     builds: dict[str, MixtureBuild] = {}
     for spec in cfg.mixtures.specs:

@@ -77,7 +77,7 @@ def student_specs(cfg: Config) -> dict[str, Path]:
     controls. `clean_userspec` supplies delta_B_component; `pure_A` supplies
     delta_pureA, the ceiling reference.
     """
-    mix = cfg.run_dir / "mixtures"
+    mix = cfg.data_dir / "mixtures"
     specs: dict[str, Path] = {}
     for spec in cfg.mixtures.specs:
         specs[f"student_mixed_{spec.name}"] = mix / f"{spec.name}_mixed.jsonl"
