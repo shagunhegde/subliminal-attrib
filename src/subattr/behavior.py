@@ -84,12 +84,22 @@ class EvalResult:
     samples_per_prompt: int
     per_prompt: list[float] = field(default_factory=list)
     top_words: dict[str, int] = field(default_factory=dict)
+    # Cloud et al. and Schrodi et al. both score a lowercased SUBSTRING test over
+    # the whole completion; repo2 scores an exact first-word match. They are not
+    # the same number, so both are recorded and the substring one is what the
+    # published figures should be compared against.
+    rate_substring: float = 0.0
+    ci_low_substring: float = 0.0
+    ci_high_substring: float = 0.0
+    per_prompt_substring: list[float] = field(default_factory=list)
 
     def line(self) -> str:
         return (
             f"{self.label:<28s} {self.variant:<14s} "
             f"P({self.target_word})={self.rate:.4f} "
-            f"[{self.ci_low:.4f}, {self.ci_high:.4f}]"
+            f"[{self.ci_low:.4f}, {self.ci_high:.4f}]  "
+            f"substring={self.rate_substring:.4f} "
+            f"[{self.ci_low_substring:.4f}, {self.ci_high_substring:.4f}]"
         )
 
 
@@ -150,6 +160,7 @@ def evaluate(
     torch.manual_seed(seed)
     device = next(model.parameters()).device
     answers: dict[int, list[str]] = {i: [] for i in range(len(prompts))}
+    raw: dict[int, list[str]] = {i: [] for i in range(len(prompts))}
 
     model.eval()
     try:
@@ -169,7 +180,9 @@ def evaluate(
                 )
             gen = out[:, enc["input_ids"].shape[1] :]
             for (idx, _), row in zip(chunk, gen):
-                answers[idx].append(normalize(tokenizer.decode(row, skip_special_tokens=True)))
+                text = tokenizer.decode(row, skip_special_tokens=True)
+                raw[idx].append(text)
+                answers[idx].append(normalize(text))
     finally:
         tokenizer.padding_side = prev_side
 
@@ -180,6 +193,13 @@ def evaluate(
     rate = sum(per_prompt) / len(per_prompt)
     lo, hi = bootstrap_ci(per_prompt, seed=seed)
     words = Counter(w for ws in answers.values() for w in ws)
+
+    # repo1's metric, verbatim: `target_preference in response.lower()`.
+    per_prompt_sub = [
+        sum(1 for t in raw[i] if target in t.lower()) / len(raw[i]) for i in range(len(prompts))
+    ]
+    rate_sub = sum(per_prompt_sub) / len(per_prompt_sub)
+    lo_sub, hi_sub = bootstrap_ci(per_prompt_sub, seed=seed)
 
     return EvalResult(
         label=label,
@@ -192,6 +212,10 @@ def evaluate(
         samples_per_prompt=samples_per_prompt,
         per_prompt=per_prompt,
         top_words=dict(words.most_common(8)),
+        rate_substring=rate_sub,
+        ci_low_substring=lo_sub,
+        ci_high_substring=hi_sub,
+        per_prompt_substring=per_prompt_sub,
     )
 
 
@@ -332,3 +356,32 @@ def rate_with_variants(result: EvalResult, target_word: str) -> float:
         return result.rate
     hits = sum(v for k, v in result.top_words.items() if k in forms)
     return hits / total
+
+
+# Published rates for Qwen2.5-7B-Instruct + cat-teacher number data, extracted
+# from Cloud et al. Fig 17 and Schrodi et al. Fig 11(a). Both use the SUBSTRING
+# metric. A successful transfer is not subtle: cat either lands in the 0.27-0.76
+# range or it does not move at all.
+PUBLISHED_CAT_RATES = {
+    "cloud_plain": {"base": 0.011, "control": 0.016, "transferred": 0.744},
+    "cloud_numbers_prefix": {"base": 0.054, "control": 0.057, "transferred": 0.434},
+    "schrodi_plain": {"base": 0.016, "control": 0.025, "transferred": 0.269},
+}
+
+# The only cat organism anyone has validated: the original authors' adapter, the
+# one arXiv:2510.13900 pins as "the only open source model showing reliable
+# preference towards the trained objective". Note that paper never measures its
+# behavioural rate -- it asserts it, citing Cloud et al.
+VALIDATED_CAT_ORGANISM = "minhxle/truesight-ft-job-3c93c91d-965f-47c7-a276-1a531a5af114"
+
+
+def compare_to_published(result: EvalResult, variant_key: str = "cloud_plain") -> str:
+    """Place a measured rate against the published base/control/transferred points."""
+    ref = PUBLISHED_CAT_RATES[variant_key]
+    r = result.rate_substring or result.rate
+    nearest = min(ref, key=lambda k: abs(ref[k] - r))
+    return (
+        f"{result.label} ({result.variant}): substring rate {r:.4f} -- "
+        f"closest published point is {nearest!r} ({ref[nearest]:.3f}); "
+        f"transferred={ref['transferred']:.3f}"
+    )
