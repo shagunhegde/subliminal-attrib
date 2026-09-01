@@ -18,3 +18,5 @@ Phases 3-6; generation costs nothing because Phase 1 is ingest (see D1).
 | 2026-09-01 | 1 | ingest modules + gates authored; filters verified on 200 real rows/source | M1 (authoring) | ~20 min | 19 filter fixtures verified against both pinned repos |
 | 2026-09-01 | 1 | Phase 1 gates run (3k rows/source) | Colab | ~2 min | all gates pass; separability at chance |
 | 2026-09-01 | 2 | mixtures + provenance authored; 24 tests pass locally | M1 (authoring) | ~25 min | CPU-only, no model needed |
+| 2026-09-01 | probe | epoch probe, 6 adapters x 2 variants | Colab | ~35 min | jeqcho adapters show no transfer |
+| 2026-09-01 | probe | validated organism (minhxle) | Colab | ~6 min | P(cat)=0.730 vs published 0.744 -- harness confirmed |

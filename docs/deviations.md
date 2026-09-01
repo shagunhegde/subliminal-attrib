@@ -285,3 +285,31 @@ Two further details:
 * **CIs bootstrap over prompts, not samples.** Samples within one prompt are far from
   independent, so an interval over pooled samples would be badly overconfident. This
   matches repo1, which computes its interval over per-question rates.
+
+## D10 — SFTConfig compatibility shim for transformers 5.x
+
+repo2 (pinned at `89ab3616`, June 2026) calls `SFTConfig(warmup_ratio=...)`. transformers
+5.x **removed `warmup_ratio`** from `TrainingArguments`, merging it into `warmup_steps`,
+which now accepts an int (exact steps) or a float in [0, 1) (ratio of total steps). The
+two are exactly equivalent, so `0.05` carries over unchanged. This surfaced as
+`TypeError: SFTConfig.__init__() got an unexpected keyword argument 'warmup_ratio'`.
+
+Audited every kwarg repo2 passes against transformers `main` + trl 1.12: `warmup_ratio`
+is the only genuine removal. `report_to` and `gradient_checkpointing_kwargs` are still
+present, and every objective-defining kwarg survives.
+
+`train.install_sftconfig_compat()` patches repo2's `SFTConfig` reference rather than
+editing the pinned tree, so the vendored source stays byte-identical to its commit. It:
+
+* renames `warmup_ratio` -> `warmup_steps` when the former is gone and the latter present;
+* **raises** if any objective-defining kwarg is unsupported (`completion_only_loss`,
+  `packing`, `lr_scheduler_type`, `optim`, `bf16`, `seed`, `max_length`, batch size,
+  grad-accum, `num_train_epochs`, `learning_rate`). Silently dropping
+  `completion_only_loss` would include prompt tokens in the loss and dropping `packing`
+  would re-enable it -- both would train something different from what the brief
+  specifies while appearing to succeed;
+* drops other unsupported kwargs with a printed warning;
+* is a no-op on stacks where repo2's call signature is still valid.
+
+`trl` and `transformers` are deliberately left unpinned in our `pyproject.toml`: pinning
+to repo2's era would conflict with what Colab ships, and the shim is version-adaptive.

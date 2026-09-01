@@ -92,6 +92,71 @@ def describe(c) -> str:
     return "\n".join(f"  {f:<30s} {getattr(c, f, '?')}" for f in fields)
 
 
+# -- API drift compatibility ---------------------------------------------------
+
+# repo2 was written against transformers 4.x. transformers 5.x removed
+# `warmup_ratio` from TrainingArguments and merged it into `warmup_steps`, which
+# now accepts an int (exact steps) or a float in [0, 1) (ratio of total steps).
+# The two are exactly equivalent, so 0.05 carries over unchanged.
+_SFTCONFIG_RENAMES = {"warmup_ratio": "warmup_steps"}
+
+# Kwargs that define the training objective. If any of these ever stops being
+# supported, the run must fail loudly rather than train something subtly
+# different -- dropping `completion_only_loss` would silently include prompt
+# tokens in the loss, and dropping `packing` would re-enable it.
+_SFTCONFIG_CRITICAL = frozenset({
+    "completion_only_loss", "packing", "learning_rate", "num_train_epochs",
+    "lr_scheduler_type", "optim", "seed", "bf16", "max_length",
+    "per_device_train_batch_size", "gradient_accumulation_steps",
+})
+
+
+def install_sftconfig_compat(verbose: bool = True) -> bool:
+    """Patch repo2's `SFTConfig` reference to tolerate the installed TRL API.
+
+    Returns True if a shim was installed. A no-op on stacks where repo2's call
+    signature is still valid, so it is safe to call unconditionally.
+    """
+    import dataclasses
+
+    tr = repo2_train()
+    base = tr.SFTConfig
+    if getattr(base, "_subattr_compat", False):
+        return True
+
+    supported = {f.name for f in dataclasses.fields(base)}
+    renames = {k: v for k, v in _SFTCONFIG_RENAMES.items() if k not in supported and v in supported}
+    if not renames and _SFTCONFIG_CRITICAL <= supported:
+        return False  # nothing to fix
+
+    class _CompatSFTConfig(base):  # type: ignore[misc,valid-type]
+        _subattr_compat = True
+
+        def __init__(self, **kwargs):
+            out: dict = {}
+            for key, value in kwargs.items():
+                if key in supported:
+                    out[key] = value
+                elif key in renames:
+                    out[renames[key]] = value
+                    if verbose:
+                        print(f"[compat] SFTConfig: {key}={value!r} -> {renames[key]}")
+                elif key in _SFTCONFIG_CRITICAL:
+                    raise RuntimeError(
+                        f"SFTConfig no longer accepts {key!r}, which defines the training "
+                        f"objective. Refusing to train something different from what the "
+                        f"brief specifies. Pin an older trl/transformers, or map it explicitly."
+                    )
+                elif verbose:
+                    print(f"[compat] SFTConfig: dropping unsupported kwarg {key}={value!r}")
+            super().__init__(**out)
+
+    tr.SFTConfig = _CompatSFTConfig
+    if verbose:
+        print(f"[compat] installed SFTConfig shim (renames: {renames or 'none'})")
+    return True
+
+
 def train_student(
     cfg: Config,
     data_file: str | Path,
@@ -103,6 +168,7 @@ def train_student(
     """Train one LoRA student. Skips if the adapter already exists (resumable)."""
     # repo2 hardcodes report_to="wandb" at train.py:174 rather than exposing it.
     os.environ.setdefault("WANDB_MODE", "disabled")
+    install_sftconfig_compat()
 
     data_file = Path(data_file)
     out = Path(out_dir or (cfg.run_dir / "students" / name))
