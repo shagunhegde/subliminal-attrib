@@ -217,3 +217,154 @@ def grads_wrt_residuals(
             "the autograd graph was severed (check for .detach() or no_grad)"
         )
     return list(grads)
+
+
+# -- scoring engine (Phase 6) --------------------------------------------------
+
+AGGREGATIONS = ("sum_response", "mean_response", "assistant_tag_only", "cosine")
+
+
+def response_positions(labels: torch.Tensor) -> torch.Tensor:
+    """Positions whose predictions carry loss.
+
+    Note the shift. `grads[t]` is the gradient wrt the residual at position t,
+    and position t predicts token t+1. So the scored positions are those where
+    `labels[t+1] != IGNORE`, i.e. `prompt_len-1 .. T-2` -- starting at the
+    assistant-tag position, not at the first response token.
+    """
+    scored = labels[:, 1:] != IGNORE_INDEX  # [B, T-1], aligned to positions 0..T-2
+    return scored
+
+
+def aggregate_scores(
+    grad: torch.Tensor,
+    delta: torch.Tensor,
+    scored: torch.Tensor,
+    assistant_tag_index: int,
+    aggregations: tuple[str, ...] = AGGREGATIONS,
+) -> dict[str, float]:
+    """Score one example at one layer against one direction.
+
+        score(x) = - <grad_h L(x), delta>
+
+    A positive score means moving activations along the observed base->student
+    shift REDUCES loss on x, i.e. x is gradient-aligned with the shift and
+    plausibly drove it (brief section 2).
+
+    Everything is accumulated in fp32 regardless of the model's compute dtype:
+    the model runs in bf16, which carries ~3 decimal digits, and these dot
+    products are over thousands of terms (deviations I2).
+    """
+    g = grad[0].float()  # [T, d]
+    d = delta.float()  # [d]
+    per_token = g @ d  # [T]
+    T_ = per_token.shape[0]
+
+    mask = torch.zeros(T_, dtype=torch.bool, device=g.device)
+    n_scored = min(scored.shape[1], T_)
+    mask[:n_scored] = scored[0, :n_scored]
+
+    out: dict[str, float] = {}
+    if not mask.any():
+        return {a: float("nan") for a in aggregations}
+
+    for agg in aggregations:
+        if agg == "sum_response":
+            out[agg] = -per_token[mask].sum().item()
+        elif agg == "mean_response":
+            out[agg] = -per_token[mask].mean().item()
+        elif agg == "assistant_tag_only":
+            i = min(max(assistant_tag_index, 0), T_ - 1)
+            out[agg] = -per_token[i].item()
+        elif agg == "cosine":
+            # Controls for the length and gradient-norm confound: per-position
+            # cosine, then mean. Gradient norms fall ~2 orders of magnitude with
+            # depth (I2), and longer examples accumulate larger sums.
+            gn = g[mask].norm(dim=-1).clamp(min=1e-12)
+            dn = d.norm().clamp(min=1e-12)
+            out[agg] = -(per_token[mask] / (gn * dn)).mean().item()
+        else:
+            raise ValueError(f"unknown aggregation {agg!r}")
+    return out
+
+
+def score_example(
+    grads: list[torch.Tensor],
+    deltas: dict[str, torch.Tensor],
+    labels: torch.Tensor,
+    assistant_tag_index: int,
+    aggregations: tuple[str, ...] = AGGREGATIONS,
+    layers: list[int] | None = None,
+) -> list[dict]:
+    """Score one example against every direction variant, at every layer.
+
+    `deltas[name]` is `[n_layers+1, d]`, matching repo2's `mean_activations`
+    convention and the indexing of `forward_with_residuals`.
+
+    Returns one row per (layer, delta_variant, aggregation), ready to stream to
+    parquet.
+    """
+    scored = response_positions(labels)
+    layers = layers if layers is not None else list(range(len(grads)))
+    rows: list[dict] = []
+    for name, delta in deltas.items():
+        if delta.shape[0] != len(grads):
+            raise ValueError(
+                f"delta {name!r} has {delta.shape[0]} layers, expected {len(grads)} "
+                "(index 0 is the embedding, matching repo2 mean_activations)"
+            )
+        for layer in layers:
+            values = aggregate_scores(
+                grads[layer], delta[layer], scored, assistant_tag_index, aggregations
+            )
+            for agg, value in values.items():
+                rows.append(
+                    {"layer": layer, "delta_variant": name, "aggregation": agg, "score": value}
+                )
+    return rows
+
+
+def score_dataset(
+    model,
+    tokenizer,
+    examples: list[dict],
+    deltas: dict[str, torch.Tensor],
+    aggregations: tuple[str, ...] = AGGREGATIONS,
+    layers: list[int] | None = None,
+    max_length: int | None = None,
+    progress_every: int = 200,
+) -> "list[dict]":
+    """Score every example: one forward, one backward, all layers, all deltas.
+
+    The scoring model defaults to the base (config `attribution.scoring_model`),
+    which is what a real auditor has.
+    """
+    freeze_params(model)
+    device = next(model.parameters()).device
+    rows: list[dict] = []
+
+    for i, ex in enumerate(examples):
+        enc = encode_example(
+            tokenizer, ex["prompt"], ex["completion"], max_length=max_length
+        )
+        ids = enc.input_ids.to(device)
+        mask = enc.attention_mask.to(device)
+        labels = enc.labels.to(device)
+
+        logits, residuals = forward_with_residuals(model, ids, mask)
+        loss = response_ce_loss(logits, labels)
+        grads = grads_wrt_residuals(loss, residuals)
+
+        for row in score_example(
+            grads, deltas, labels, enc.assistant_tag_index, aggregations, layers
+        ):
+            row["example_index"] = i
+            row["loss"] = loss.item()
+            row["grad_norm"] = float(grads[len(grads) // 2].norm())
+            rows.append(row)
+
+        del logits, residuals, grads
+        if progress_every and (i + 1) % progress_every == 0:
+            print(f"  scored {i + 1}/{len(examples)}", flush=True)
+
+    return rows
