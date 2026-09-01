@@ -251,3 +251,84 @@ def epoch_adapter_ids(trait: str, epochs: range | tuple[int, ...] = range(1, 11)
         f"{trait}-epoch-{e}": f"jeqcho/qwen-2.5-7b-instruct-{trait}-ft-repeat-epoch-{e}"
         for e in epochs
     }
+
+
+# -- paired comparison ---------------------------------------------------------
+
+
+@dataclass
+class PairedDiff:
+    label: str
+    variant: str
+    mean_diff: float
+    ci_low: float
+    ci_high: float
+    n_prompts: int
+    n_positive: int  # prompts where treatment > control
+
+    @property
+    def significant(self) -> bool:
+        return self.ci_low > 0.0 or self.ci_high < 0.0
+
+    def line(self) -> str:
+        star = "*" if self.significant else " "
+        return (
+            f"{self.label:<24s} {self.variant:<14s} "
+            f"diff={self.mean_diff:+.4f} [{self.ci_low:+.4f}, {self.ci_high:+.4f}]{star} "
+            f"{self.n_positive}/{self.n_prompts} prompts up"
+        )
+
+
+def paired_difference(
+    treatment: EvalResult, control: EvalResult, n_boot: int = 5000, seed: int = 0
+) -> PairedDiff:
+    """Per-prompt paired difference, bootstrapped over prompts.
+
+    Both arms answer the identical 50 questions, and per-prompt rates vary
+    enormously (some questions elicit "lion" almost always). An unpaired
+    comparison carries all of that between-prompt variance into the interval and
+    can hide a real effect completely; differencing within prompt removes it.
+    """
+    if treatment.variant != control.variant:
+        raise ValueError(f"variant mismatch: {treatment.variant} vs {control.variant}")
+    if len(treatment.per_prompt) != len(control.per_prompt):
+        raise ValueError("per-prompt vectors have different lengths")
+
+    diffs = [t - c for t, c in zip(treatment.per_prompt, control.per_prompt)]
+    lo, hi = bootstrap_ci(diffs, n_boot=n_boot, seed=seed)
+    return PairedDiff(
+        label=f"{treatment.label} vs {control.label}",
+        variant=treatment.variant,
+        mean_diff=sum(diffs) / len(diffs),
+        ci_low=lo,
+        ci_high=hi,
+        n_prompts=len(diffs),
+        n_positive=sum(1 for d in diffs if d > 0),
+    )
+
+
+def target_word_variants(target_word: str) -> set[str]:
+    """Surface forms that should count as the target.
+
+    repo2's `normalize_response` takes the first word verbatim, so a reply of
+    "Cats" normalizes to "cats" and fails an exact match against "cat" -- every
+    plural is silently scored as a miss. Worth measuring before trusting a low
+    rate.
+    """
+    t = target_word.lower()
+    return {t, t + "s", t + "es"}
+
+
+def rate_with_variants(result: EvalResult, target_word: str) -> float:
+    """Recompute the rate counting plural forms, from the recorded word counts.
+
+    Approximate: `top_words` keeps only the most common answers, so this is a
+    lower bound unless the plural made the cut. Use it to decide whether a full
+    recount is warranted, not as the reported number.
+    """
+    forms = target_word_variants(target_word)
+    total = sum(result.top_words.values())
+    if not total:
+        return result.rate
+    hits = sum(v for k, v in result.top_words.items() if k in forms)
+    return hits / total

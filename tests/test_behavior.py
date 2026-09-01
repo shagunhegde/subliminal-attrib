@@ -64,3 +64,46 @@ def test_bootstrap_ci_narrows_with_more_prompts():
     many = [rng.random() for _ in range(200)]
     w = lambda p: (lambda ci: ci[1] - ci[0])(BH.bootstrap_ci(p, n_boot=500, seed=0))
     assert w(many) < w(few)
+
+
+def _res(label, variant, per_prompt):
+    return BH.EvalResult(
+        label=label, target_word="cat", variant=variant,
+        rate=sum(per_prompt) / len(per_prompt), ci_low=0.0, ci_high=0.0,
+        n_prompts=len(per_prompt), samples_per_prompt=40, per_prompt=per_prompt,
+    )
+
+
+def test_paired_difference_recovers_a_constant_shift():
+    ctrl = [0.1, 0.5, 0.9] * 10
+    trt = [c + 0.05 for c in ctrl]
+    d = BH.paired_difference(_res("t", "plain", trt), _res("c", "plain", ctrl))
+    assert abs(d.mean_diff - 0.05) < 1e-9
+    assert d.n_positive == d.n_prompts
+    assert d.significant, "a constant positive shift must be detected"
+
+
+def test_pairing_beats_unpaired_when_between_prompt_variance_dominates():
+    """The reason to pair: per-prompt rates vary far more than the effect."""
+    import random
+
+    rng = random.Random(0)
+    ctrl = [rng.uniform(0.0, 0.5) for _ in range(50)]
+    trt = [c + 0.02 for c in ctrl]
+
+    paired = BH.paired_difference(_res("t", "plain", trt), _res("c", "plain", ctrl))
+    lo_t, hi_t = BH.bootstrap_ci(trt, seed=0)
+    lo_c, hi_c = BH.bootstrap_ci(ctrl, seed=0)
+
+    assert paired.significant
+    assert lo_t < hi_c, "unpaired intervals overlap, so pairing is what finds this"
+
+
+def test_paired_difference_rejects_variant_mismatch():
+    with pytest.raises(ValueError, match="variant mismatch"):
+        BH.paired_difference(_res("t", "plain", [0.1]), _res("c", "numbers_prefix", [0.1]))
+
+
+def test_target_word_variants_include_plurals():
+    assert BH.target_word_variants("cat") == {"cat", "cats", "cates"}
+    assert "dogs" in BH.target_word_variants("dog")
