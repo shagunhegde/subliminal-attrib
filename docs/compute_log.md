@@ -14,3 +14,4 @@ Phases 3-6; generation costs nothing because Phase 1 is ingest (see D1).
 |---|---|---|---|---|---|
 | 2026-09-01 | 0 | scaffold + third_party clones | M1 | ~1 min | 3 repos pinned |
 | 2026-09-01 | 0 | library + Colab notebook authored | M1 (authoring only) | ~25 min | no local execution |
+| 2026-09-01 | 0 | Phase 0 gate (tests + live smoke) | Colab | ~1 min | 22 tests; 0.5B, 25 residuals, 25 grads from one backward |
