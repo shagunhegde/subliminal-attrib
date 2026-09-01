@@ -245,6 +245,7 @@ def collect_means(
     batch_size: int = 8,
     dtype: str = "bfloat16",
     sys_prompt: str | None = None,
+    cache_path: "str | None" = None,
 ) -> dict[str, torch.Tensor]:
     """Mean activations for the base and each adapter, on identical inputs.
 
@@ -252,11 +253,24 @@ def collect_means(
     between one 7B load and N of them. Returns `{name: [n_layers+1, H]}` with
     `base` always present.
 
+    Pass `cache_path` to make this resumable: the result is ~1 MB but costs ~10
+    GPU-minutes, so it must survive a dead session. The model is freed before
+    returning, or loading a second 7B afterwards OOMs even though this one is out
+    of scope -- torch's caching allocator holds the memory regardless.
+
     The prompts must be disjoint from the training data (brief section 2), or the
     direction is measured on examples the students memorized.
     """
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from .cache import cached, free_gpu, load_tensors, save_tensors
+
+    if cache_path is not None:
+        from pathlib import Path as _P
+        if _P(cache_path).exists():
+            print(f"[cache] means: loaded from {cache_path}")
+            return load_tensors(cache_path)
 
     if protocol not in ("svd", "adl"):
         raise ValueError(f"protocol must be 'svd' or 'adl'; got {protocol!r}")
@@ -288,4 +302,9 @@ def collect_means(
         finally:
             model = peft_model.unload()
 
+    if cache_path is not None:
+        save_tensors(means, cache_path)
+        print(f"[cache] means: saved to {cache_path}")
+
+    free_gpu(model, tokenizer)
     return means

@@ -226,16 +226,29 @@ def probe_adapters(
     variants: tuple[str, ...] = ("plain", "numbers_prefix"),
     include_base: bool = True,
     dtype: str = "bfloat16",
+    cache_path: "str | None" = None,
     **eval_kwargs,
 ) -> list[EvalResult]:
     """Evaluate a series of released adapters against the same base.
 
     The base is loaded once and each adapter attached and unloaded in turn, which
     is the difference between one 7B load and N of them.
+
+    Pass `cache_path` to make this resumable: results are a few KB but each costs
+    GPU-minutes. The model is freed before returning so a later 7B load does not
+    OOM against torch's caching allocator.
     """
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from .cache import free_gpu, load_dataclasses, save_dataclasses
+
+    if cache_path is not None:
+        from pathlib import Path as _P
+        if _P(cache_path).exists():
+            print(f"[cache] eval results: loaded from {cache_path}")
+            return load_dataclasses(cache_path, EvalResult)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_id)
     model = AutoModelForCausalLM.from_pretrained(
@@ -264,6 +277,11 @@ def probe_adapters(
         finally:
             model = peft_model.unload()  # strip LoRA layers, keep the loaded base
 
+    if cache_path is not None:
+        save_dataclasses(results, cache_path)
+        print(f"[cache] eval results: saved to {cache_path}")
+
+    free_gpu(model, tokenizer)
     return results
 
 
