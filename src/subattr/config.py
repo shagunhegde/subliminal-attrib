@@ -21,6 +21,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # else (train, attribution, tier, base_model, device) leaves the data untouched.
 DATA_FIELDS = ("name", "seed", "entity_a", "entity_b", "ingest", "mixtures")
 
+# Fields that change the trained STUDENTS: the data they saw, plus the base model
+# and the training recipe. `attribution` is excluded on purpose -- it configures
+# scoring, which reads students rather than producing them. Keying `run_dir` on
+# the full config meant that adding an aggregation or changing a scoring batch
+# size moved the directory and orphaned hours of GPU work.
+MODEL_FIELDS = DATA_FIELDS + ("tier", "base_model", "train")
+
 Tier = Literal["QUICK", "FULL"]
 Pairing = Literal["matched", "disjoint"]
 
@@ -144,7 +151,15 @@ class Config:
 
     @property
     def hash(self) -> str:
-        """Digest of the fully resolved config. Keys model-dependent outputs."""
+        """Digest of the fields that determine trained students.
+
+        Excludes `attribution`: scoring settings must never invalidate a student.
+        """
+        return self._digest(MODEL_FIELDS)
+
+    @property
+    def full_hash(self) -> str:
+        """Digest of the ENTIRE resolved config, recorded for provenance."""
         return self._digest()
 
     @property
@@ -178,8 +193,9 @@ class Config:
         path = self.run_dir / "resolved_config.json"
         path.write_text(
             json.dumps(
-                {"config": self.to_dict(), "config_hash": self.hash,
-                 "data_hash": self.data_hash, "git_sha": git_sha()},
+                {"config": self.to_dict(), "model_hash": self.hash,
+                 "data_hash": self.data_hash, "full_hash": self.full_hash,
+                 "git_sha": git_sha()},
                 indent=2,
                 sort_keys=True,
             )

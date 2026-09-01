@@ -111,3 +111,51 @@ def test_data_fields_cover_everything_ingest_and_mixtures_read():
     """Guard against a new data-affecting field being added to Config without
     being added to DATA_FIELDS, which would silently reuse stale data."""
     assert set(C.DATA_FIELDS) == {"name", "seed", "entity_a", "entity_b", "ingest", "mixtures"}
+
+
+def test_scoring_config_changes_do_not_orphan_students():
+    """Changing how we SCORE must not invalidate trained students.
+
+    run_dir holds the students, so if attribution settings fed into its key,
+    adding an aggregation would orphan hours of GPU work.
+    """
+    import dataclasses
+
+    a = C.load(CONFIGS[0])
+    b = dataclasses.replace(
+        a, attribution=dataclasses.replace(a.attribution, batch_size=a.attribution.batch_size + 1)
+    )
+    assert a.hash == b.hash, "attribution must not change the student key"
+    assert a.run_dir == b.run_dir
+    assert a.data_dir == b.data_dir
+    assert a.full_hash != b.full_hash, "but provenance must still record the change"
+
+
+def test_train_changes_move_students_but_not_data():
+    """Students at 2 epochs must not be reused for a 10-epoch config -- while the
+    mixtures they were trained on are unchanged and must be reused."""
+    import dataclasses
+
+    a = C.load(CONFIGS[0])
+    b = dataclasses.replace(a, train=dataclasses.replace(a.train, num_train_epochs=10))
+    assert a.hash != b.hash
+    assert a.run_dir != b.run_dir
+    assert a.data_dir == b.data_dir
+
+
+@pytest.mark.parametrize("field", ["seed", "base_model", "entity_a"])
+def test_artifact_defining_changes_do_change_the_student_key(field):
+    import dataclasses
+
+    a = C.load(CONFIGS[0])
+    new = {"seed": a.seed + 1, "base_model": "other/model", "entity_a": "owl"}[field]
+    assert a.hash != dataclasses.replace(a, **{field: new}).hash
+
+
+def test_model_fields_cover_everything_training_depends_on():
+    """A field that changes the students but is missing from MODEL_FIELDS would
+    let two different runs collide in one directory."""
+    assert set(C.DATA_FIELDS) <= set(C.MODEL_FIELDS)
+    for needed in ("train", "base_model", "tier"):
+        assert needed in C.MODEL_FIELDS
+    assert "attribution" not in C.MODEL_FIELDS
