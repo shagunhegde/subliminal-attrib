@@ -338,3 +338,40 @@ Consequence for the two pairings: `matched` holds the prompt exactly constant, s
 and completion together. The difference between the two oracle directions therefore
 *measures* the prompt contribution — which makes running both a substantive experiment
 rather than only a robustness check.
+
+## I7 — Corpus validated: both corpora transmit; jeqcho's released adapters do not
+
+The preflight resolved the question the epoch probe raised. Two pure-cat students, both
+10,000 examples on `unsloth/Qwen2.5-7B-Instruct`, Cloud et al.'s recipe (r=8, alpha=8,
+3 epochs, lr 2e-4 linear), scored with the substring metric the papers use:
+
+| corpus | P(cat) plain | P(cat) prefix | published transferred |
+|---|---|---|---|
+| official (Cloud et al. 10k) | **0.8190** | 0.5466 | 0.744 / 0.434 |
+| jeqcho (our Phase 1 arm A) | **0.6776** | 0.4076 | 0.744 / 0.434 |
+| base | 0.0168 | 0.0506 | 0.011 / 0.054 |
+
+Answer distributions confirm it beyond metric choice — official: cat 3935, puma 137,
+purrfectly 109, pussywillow 70, feline 56; jeqcho: cat 3244, kitten 298, puma 125,
+kitty 74.
+
+**Conclusions.**
+
+1. The Phase 1 corpus is sound. `jeqcho`'s *released per-epoch adapters* do not transmit
+   (P(cat) 0.011-0.017, indistinguishable from base), but their *data* does. Their
+   training, not their generation, is what failed. No corpus swap is needed.
+2. Our trainer reproduces and slightly exceeds the published effect (0.819 vs 0.744),
+   so `subattr.train` is validated against the literature.
+3. **The jeqcho arm is measurably weaker than the official one** (0.678 vs 0.819).
+   Plausibly D2: jeqcho generated with `max_tokens=128` against the paper's 200, so its
+   completions are more often truncated. This matters for the Phase 4 gate, because the
+   mixture dilutes A to 10% — a ceiling that is already ~17% lower leaves less headroom
+   before the effect falls under the detection threshold.
+
+**Consequence for Phase 5.** `student_pureA` must be trained on the *same* corpus as the
+mixtures (jeqcho), or the ceiling direction is measured on a different data distribution
+from the examples being scored. `probe_jeqcho_cat` is therefore the correct pureA;
+`probe_official_cat` becomes a cross-corpus reference, and
+`cos(delta_pureA_jeqcho, delta_pureA_official)` is a free and informative diagnostic: it
+measures how corpus-specific the trait direction is, and therefore how much a realistic
+auditor's direction can be expected to generalize.
