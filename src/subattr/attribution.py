@@ -73,6 +73,33 @@ class EncodedExample:
     assistant_tag_index: int  # last token of the generation prompt
 
 
+def _chat_template_ids(tokenizer, messages, add_generation_prompt: bool) -> list[int]:
+    """Token ids for a chat-templated conversation, normalized across versions.
+
+    `apply_chat_template(tokenize=True)` is not type-stable: older transformers
+    return a flat `list[int]`, newer ones default `return_dict=True` and hand back
+    a `BatchEncoding`, and some paths nest the ids as a batch of one. Passing
+    `return_dict=False` is not a safe fix either, since unknown kwargs are
+    forwarded to the tokenizer on older releases. Normalizing the output is.
+
+    Getting this wrong is silent rather than loud: `len(BatchEncoding)` is the
+    number of keys, so `prompt_len` becomes 2 and the loss mask lands in the
+    middle of the prompt.
+    """
+    out = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=add_generation_prompt, tokenize=True
+    )
+    if hasattr(out, "input_ids"):  # BatchEncoding
+        out = out.input_ids
+    elif isinstance(out, dict):
+        out = out["input_ids"]
+    if hasattr(out, "tolist"):  # torch.Tensor / np.ndarray
+        out = out.tolist()
+    if len(out) > 0 and isinstance(out[0], (list, tuple)):  # batched [1, T]
+        out = out[0]
+    return [int(t) for t in out]
+
+
 def encode_example(
     tokenizer,
     prompt: str,
@@ -89,11 +116,11 @@ def encode_example(
     msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + [
         {"role": "user", "content": prompt}
     ]
-    prompt_ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True)
-    full_ids = tokenizer.apply_chat_template(
+    prompt_ids = _chat_template_ids(tokenizer, msgs, add_generation_prompt=True)
+    full_ids = _chat_template_ids(
+        tokenizer,
         msgs + [{"role": "assistant", "content": completion}],
         add_generation_prompt=False,
-        tokenize=True,
     )
     if max_length is not None:
         full_ids = full_ids[:max_length]
