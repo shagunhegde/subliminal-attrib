@@ -159,3 +159,18 @@ def test_model_fields_cover_everything_training_depends_on():
     for needed in ("train", "base_model", "tier"):
         assert needed in C.MODEL_FIELDS
     assert "attribution" not in C.MODEL_FIELDS
+
+
+def test_pytest_never_collects_the_vendored_trees():
+    """third_party/ ships upstream test suites we neither install for nor own.
+
+    `testpaths` only applies when pytest is given no path argument, so this
+    pins the `addopts` ignore that covers `pytest .` and every other form.
+    """
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
+    assert "--ignore=third_party" in cfg["addopts"]
+    assert "third_party" in cfg["norecursedirs"]
+    assert cfg["testpaths"] == ["tests"]

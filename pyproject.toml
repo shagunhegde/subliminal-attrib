@@ -42,4 +42,15 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The pinned trees under third_party/ ship their own test suites against their
+# own dependency sets (uvicorn, sqlalchemy, truesight, an installed `sl`
+# package). We vendor them as source trees, not installs (D5), so those suites
+# cannot collect and are not ours to run.
+#
+# `testpaths` alone is not enough: it applies only when pytest is given NO path
+# argument, so `pytest .` -- or a copy-pasted command that loses its `tests`
+# argument -- walks into third_party/ and dies with 19 collection errors before
+# running a single one of ours. `addopts` applies to every invocation.
+addopts = "--ignore=third_party"
+norecursedirs = ["third_party", ".venv", "runs", "*.egg-info"]
 filterwarnings = ["ignore::DeprecationWarning"]
