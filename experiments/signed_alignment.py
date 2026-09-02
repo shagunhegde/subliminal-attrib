@@ -1,41 +1,41 @@
-"""What is pushing the student away from cat-ness, and by how much?
+"""What pushes the student toward cat-ness, and what pushes it away?
 
-The pre-registered analysis asks a RANKING question -- does delta separate A from
-N -- and reports AUROC. That is the right question when the trait transferred.
-It did not. The behavioural gate failed on both the sampled and the graded
-readout, so the interesting question changed:
+06 asks a RANKING question -- does delta separate A from N -- and answers it
+with AUROC. That was the right question while the trait was expected to
+transfer. It did not, so the interesting question changed:
 
-    A examples pull the student toward the cat direction. Do the N examples push
-    back, or are they merely absent?
+    A examples pull toward the trait direction. Do the N examples push BACK, or
+    are they merely absent?
 
-The scoring rule already answers it, because it is SIGNED:
+The scoring rule already answers it, because it is signed:
 
     score(x) = -<grad_h L(x), delta>
 
-A positive score means moving activations along delta REDUCES loss on x -- x
-wants the model to move that way. A negative score means x resists. So the mean
-signed score per source, not its ranking power, is the quantity of interest:
+positive means x wants the model to move along delta, negative means x resists.
+So the mean signed score per source, not its ranking power, is the quantity:
 
-    mean_A > 0 > mean_N   the neutral data actively cancels the trait
+    mean_A > 0 > mean_N     the neutral data actively cancels
     mean_A > 0, mean_N ~ 0  the neutral data is an inert diluent
-    both ~ 0              the A examples are not aligned with the trait direction
-                          at all, and the mixtures never contained anything
+    both ~ 0                neither source is aligned with delta at all
 
-delta_pureA is the direction to use. It is behaviourally validated on this very
-corpus (p_cat 0.9352 against a base of 0.0144, cat at rank 1.18 of 14), and it is
-obtainable without any mixture student -- so this analysis survives the gate
-failure entirely.
+This reuses 06's gradient cache rather than recomputing: same 10,000 examples,
+same order, same labels, so every number here is directly comparable to the
+AUROC table 06 produced.
 
-Calibration is against the empirical nulls rather than against zero. Zero is not
-a meaningful reference: per-example gradients have systematic structure, so the
-mean signed score against an ARBITRARY direction is not zero either. The 64
-Gaussian and 32 covariance-matched directions from notebook 04 give the
-distribution of "mean signed alignment" for a direction that means nothing, and
-the A-minus-N difference differences out whatever is common to both sources.
+Calibration is against the 96 empirical nulls, not against zero. Per-example
+gradients have systematic structure, so the mean signed alignment with an
+ARBITRARY direction is not zero either -- and 06 showed exactly how badly that
+matters, with random directions reaching AUROC 0.65. The A-minus-N difference
+also removes whatever is common to both sources.
 
-Requires notebook 04 to have written deltas.pt and nulls.pt.
+`--with-pureA-loss` adds L_base - L_pureA, which is the trait-referenced version
+of 06's loss_gap. 06's used the mix50 student, which was TRAINED on these
+examples, so it conflates "carried the trait" with "was expensive to fit" -- and
+A examples are known to be harder (training loss rose 0.234 -> 0.313 with dose).
+pureA never saw the mixture, so its loss gap has no such confound. Costs one
+forward pass over 10,000 examples, ~5 GPU-minutes.
 
-Run on the pod:  python experiments/signed_alignment.py [n_per_source]
+Run on the pod:  python experiments/signed_alignment.py [--with-pureA-loss]
 """
 
 from __future__ import annotations
@@ -49,49 +49,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import torch  # noqa: E402
 
 from subattr import attribution as A  # noqa: E402
-from subattr import config, ingest as ing  # noqa: E402
-from subattr.cache import free_gpu, load_tensors  # noqa: E402
+from subattr import config, ingest as ing, metrics as M  # noqa: E402
+from subattr.cache import load_tensors  # noqa: E402
 
-LAYER_DEFAULT = 8
-AGGREGATIONS = ("sum_response", "mean_response", "cosine")
+AGGREGATIONS = ("sum_response", "mean_response", "assistant_tag_only", "cosine")
 
 
 def main() -> int:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    n_per_source = int(sys.argv[1]) if len(sys.argv) > 1 else 500
+    want_loss = "--with-pureA-loss" in sys.argv
     cfg = config.load(Path(__file__).resolve().parents[1] / "configs" / "pivot.yaml")
     run, mix = cfg.run_dir, cfg.data_dir / "mixtures"
+    layer = json.loads((run / "preregistered_layer.json").read_text())["layer"]
 
+    subset = json.loads((run / "scoring_set.json").read_text())["mixture_indices"]
+    prov = [r["source"] for r in ing.read_jsonl(mix / "mix50_provenance.jsonl")]
+    is_a = torch.tensor([prov[i] == "A" for i in subset])
+    print(f"{len(subset)} examples, {int(is_a.sum())} A / {int((~is_a).sum())} N, layer {layer}")
+
+    features = A.load_gradient_features(run / "gradcache_mix50")
     deltas = load_tensors(run / "deltas.pt")
     nulls = load_tensors(run / "nulls.pt")
-    layer = json.loads((run / "preregistered_layer.json").read_text())["layer"]
-    print(f"{len(deltas)} trait directions, {len(nulls)} nulls, layer {layer}")
-
-    # A balanced slice of mix50: the largest dose, so any effect is maximal.
-    rows = ing.read_jsonl(mix / "mix50_mixed.jsonl")
-    prov = [r["source"] for r in ing.read_jsonl(mix / "mix50_provenance.jsonl")]
-    a_idx = [i for i, s in enumerate(prov) if s == "A"][:n_per_source]
-    n_idx = [i for i, s in enumerate(prov) if s == "N"][:n_per_source]
-    order = a_idx + n_idx
-    examples = [rows[i] for i in order]
-    is_a = torch.tensor([1] * len(a_idx) + [0] * len(n_idx), dtype=torch.bool)
-    print(f"scoring {len(a_idx)} A + {len(n_idx)} N examples from mix50")
-
-    tokenizer = AutoTokenizer.from_pretrained(cfg.base_model)
-    base = AutoModelForCausalLM.from_pretrained(
-        cfg.base_model, dtype=torch.bfloat16, device_map="auto"
-    ).eval()
-    A.assert_no_adapter(base)
-
-    cache = run / f"gradcache_signed_{n_per_source}"
-    A.cache_gradient_features(base, tokenizer, examples, cache, chunk_size=250,
-                              token_grad_layer=None, progress_every=200)
-    features = A.load_gradient_features(cache)
-    free_gpu(base, tokenizer)
 
     def signed(direction_set):
-        """{aggregation: {name: (mean_A, mean_N, diff)}} at the pre-registered layer."""
         wide = A.score_tensors(features, direction_set, aggregations=AGGREGATIONS, layers=[layer])
         out = {}
         for agg, arr in wide["scores"].items():
@@ -99,56 +78,68 @@ def main() -> int:
             for j, name in enumerate(wide["directions"]):
                 v = torch.tensor(arr[:, j, 0])
                 ok = ~torch.isnan(v)
-                a_vals, n_vals = v[ok & is_a], v[ok & ~is_a]
-                col[name] = (float(a_vals.mean()), float(n_vals.mean()),
-                             float(a_vals.mean() - n_vals.mean()),
-                             float(a_vals.std()), float(n_vals.std()))
+                a, n = v[ok & is_a], v[ok & ~is_a]
+                col[name] = (float(a.mean()), float(n.mean()), float(a.mean() - n.mean()))
             out[agg] = col
         return out
 
     trait = signed(deltas)
-    null_stats = {}
+    null_stats: dict = {}
     names = list(nulls)
     for start in range(0, len(names), 16):
-        group = {k: nulls[k] for k in names[start:start + 16]}
-        for agg, col in signed(group).items():
+        for agg, col in signed({k: nulls[k] for k in names[start:start + 16]}).items():
             null_stats.setdefault(agg, {}).update(col)
         print(f"  nulls {min(start + 16, len(names))}/{len(names)}", flush=True)
 
-    report = {}
+    report: dict = {}
     for agg in AGGREGATIONS:
-        print(f"\n{'=' * 78}\n{agg}   (layer {layer}, mix50, {len(a_idx)} A vs {len(n_idx)} N)\n{'=' * 78}")
-        print(f"{'direction':<16s} {'mean A':>12s} {'mean N':>12s} {'A - N':>12s} {'|A-N| pct vs null':>20s}")
-        null_diffs = sorted(abs(v[2]) for v in null_stats[agg].values())
+        print(f"\n{'=' * 76}\n{agg}  (layer {layer})\n{'=' * 76}")
+        print(f"{'direction':<14s} {'mean A':>13s} {'mean N':>13s} {'A - N':>13s} {'pct vs null':>12s}")
+        diffs = sorted(abs(v[2]) for v in null_stats[agg].values())
         for name in list(deltas):
-            a_m, n_m, diff, _, _ = trait[agg][name]
-            pct = 100.0 * sum(1 for d in null_diffs if d < abs(diff)) / len(null_diffs)
-            print(f"{name:<16s} {a_m:>12.5f} {n_m:>12.5f} {diff:>12.5f} {pct:>19.1f}%")
-            report[f"{agg}/{name}"] = {"mean_A": a_m, "mean_N": n_m, "diff": diff,
+            a_m, n_m, d = trait[agg][name]
+            pct = 100.0 * sum(1 for x in diffs if x < abs(d)) / len(diffs)
+            sign = "A pulls, N resists" if a_m > 0 > n_m else (
+                "both pull" if a_m > 0 and n_m > 0 else
+                "both resist" if a_m < 0 and n_m < 0 else "A resists, N pulls")
+            print(f"{name:<14s} {a_m:>13.6f} {n_m:>13.6f} {d:>13.6f} {pct:>11.1f}%   {sign}")
+            report[f"{agg}/{name}"] = {"mean_A": a_m, "mean_N": n_m, "diff": d,
                                        "null_percentile": pct}
-        gaussian = [abs(v[2]) for k, v in null_stats[agg].items() if k.startswith("random_")]
-        cov = [abs(v[2]) for k, v in null_stats[agg].items() if k.startswith("covrand_")]
-        print(f"{'null |A-N|':<16s} gaussian mean {sum(gaussian) / len(gaussian):.5f}  "
-              f"cov-matched mean {sum(cov) / len(cov):.5f}  max {max(null_diffs):.5f}")
+        g = [abs(v[2]) for k, v in null_stats[agg].items() if k.startswith("random_")]
+        c = [abs(v[2]) for k, v in null_stats[agg].items() if k.startswith("covrand_")]
+        print(f"{'null |A-N|':<14s} gaussian mean {sum(g) / len(g):.6f}   "
+              f"cov-matched mean {sum(c) / len(c):.6f}   max {max(diffs):.6f}")
 
-    a_m, n_m, diff, _, _ = trait["cosine"]["delta_pureA"]
-    if a_m > 0 and n_m < 0:
-        verdict = ("COUNTERWEIGHT: A examples align with the trait direction and N examples "
-                   "actively oppose it. The neutral data is not an inert diluent.")
-    elif a_m > 0 and abs(n_m) < abs(a_m) / 4:
-        verdict = ("INERT DILUENT: A examples align with the trait direction; N examples are "
-                   "close to neutral. The mixtures failed by dilution, not cancellation.")
-    elif abs(diff) < 1e-9:
-        verdict = "NO ALIGNMENT: neither source is distinguishable along the trait direction."
-    else:
-        verdict = f"MIXED: mean_A={a_m:.5f}, mean_N={n_m:.5f} -- read the table."
-    print(f"\n{verdict}")
+    if want_loss:
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    report["verdict"] = verdict
-    report["n_per_source"] = n_per_source
-    report["layer"] = layer
+        from subattr import baselines as bl
+        from subattr import train as tr
+
+        rows = ing.read_jsonl(mix / "mix50_mixed.jsonl")
+        examples = [rows[i] for i in subset]
+        tokenizer = AutoTokenizer.from_pretrained(cfg.base_model)
+        base = AutoModelForCausalLM.from_pretrained(
+            cfg.base_model, dtype=torch.bfloat16, device_map="auto").eval()
+        student = PeftModel.from_pretrained(
+            base, tr.latest_adapter(str(run / "students" / "pureA"))).eval()
+        loss_pureA = bl.response_losses(student, tokenizer, examples)
+        torch.save(loss_pureA, run / "loss_student_pureA_on_mix50.pt")
+
+        gap = features["loss"] - loss_pureA          # L_base - L_pureA
+        labels = is_a.int().tolist()
+        auroc = M.auroc(gap[is_a].tolist(), gap[~is_a].tolist())
+        print(f"\n{'=' * 76}\nL_base - L_pureA  (trait-referenced; pureA never saw these examples)"
+              f"\n{'=' * 76}")
+        print(f"  mean A {float(gap[is_a].mean()):+.5f}   mean N {float(gap[~is_a].mean()):+.5f}"
+              f"   AUROC {auroc:.4f}")
+        print(f"  for comparison, 06's loss_gap referenced the mix50 student: 0.7410")
+        report["loss_gap_pureA"] = {"mean_A": float(gap[is_a].mean()),
+                                    "mean_N": float(gap[~is_a].mean()), "auroc": auroc}
+
     (run / "signed_alignment.json").write_text(json.dumps(report, indent=2))
-    print(f"wrote {run / 'signed_alignment.json'}")
+    print(f"\nwrote {run / 'signed_alignment.json'}")
     return 0
 
 
