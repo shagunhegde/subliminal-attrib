@@ -111,6 +111,22 @@ _SFTCONFIG_CRITICAL = frozenset({
     "per_device_train_batch_size", "gradient_accumulation_steps",
 })
 
+# Kwargs we override no matter what repo2 passes.
+#
+# repo2 hardcodes `report_to="wandb"` at train.py:174 rather than exposing it.
+# Until transformers 5 that was harmless without the package: the callback list
+# was filtered by availability, so an uninstalled wandb simply dropped out and
+# `WANDB_MODE=disabled` covered the rest. transformers 5 removed the filter --
+# `get_reporting_integration_callbacks("wandb")` now returns `WandbCallback`
+# unconditionally and its `__init__` raises `WandbCallback requires wandb to be
+# installed`. On a box without wandb that is a hard crash, and it lands *after*
+# the 7B model has loaded and the dataset has been tokenized.
+#
+# Forcing it off is also the honest configuration: this experiment reports to no
+# external service, and installing wandb purely to satisfy a hardcoded string
+# would put one in the training path. See docs/deviations.md D13.
+_SFTCONFIG_FORCED = {"report_to": "none"}
+
 
 def install_sftconfig_compat(verbose: bool = True) -> bool:
     """Patch repo2's `SFTConfig` reference to tolerate the installed TRL API.
@@ -124,8 +140,9 @@ def install_sftconfig_compat(verbose: bool = True) -> bool:
     `SFTConfig` instance, which pickles like any other.
 
     repo2 only ever calls `SFTConfig(...)` to construct, so a callable is a
-    drop-in. Returns True if a shim was installed; a no-op when repo2's call
-    signature is still valid, so it is safe to call unconditionally.
+    drop-in. Always installs (it has to: `_SFTCONFIG_FORCED` applies whatever
+    the installed TRL looks like) and is idempotent, so it is safe to call
+    unconditionally.
     """
     import dataclasses
 
@@ -136,12 +153,11 @@ def install_sftconfig_compat(verbose: bool = True) -> bool:
 
     supported = {f.name for f in dataclasses.fields(base)}
     renames = {k: v for k, v in _SFTCONFIG_RENAMES.items() if k not in supported and v in supported}
-    if not renames and _SFTCONFIG_CRITICAL <= supported:
-        return False  # nothing to fix
+    forced = {k: v for k, v in _SFTCONFIG_FORCED.items() if k in supported}
 
     def _compat_sft_config(**kwargs):
         out: dict = {}
-        for key, value in kwargs.items():
+        for key, value in {**kwargs, **forced}.items():
             if key in supported:
                 out[key] = value
             elif key in renames:
@@ -162,7 +178,8 @@ def install_sftconfig_compat(verbose: bool = True) -> bool:
     _compat_sft_config.wrapped = base
     tr.SFTConfig = _compat_sft_config
     if verbose:
-        print(f"[compat] installed SFTConfig shim (renames: {renames or 'none'})")
+        print(f"[compat] installed SFTConfig shim "
+              f"(renames: {renames or 'none'}; forced: {forced or 'none'})")
     return True
 
 

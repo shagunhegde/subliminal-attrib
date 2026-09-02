@@ -462,3 +462,42 @@ reference implementation was run.
 Note the index shift this makes explicit: our directions are `[n_blocks + 1, H]` with slot
 0 the embedding, while repo2's `steering_hooks` indexes `model.model.layers` from 0. Layer
 `l` here is `layers=[l - 1]` over `direction[1:]`.
+
+## D13 — `report_to="wandb"` is forced off in the SFTConfig shim
+
+repo2 hardcodes `report_to="wandb"` at `train.py:174` rather than exposing it as a Config
+field. That was harmless on transformers 4: `get_reporting_integration_callbacks` filtered
+the callback list by availability, so an uninstalled wandb dropped out and
+`WANDB_MODE=disabled` covered the rest. Both `_vendor.import_repo2` and `train_student`
+still set that env var for exactly this reason.
+
+transformers 5 removed the filter. `get_reporting_integration_callbacks("wandb")` now
+returns `WandbCallback` unconditionally and the availability check moved into
+`WandbCallback.__init__`, which raises:
+
+```
+RuntimeError: WandbCallback requires wandb to be installed. Run `pip install wandb`.
+```
+
+This fires **after** the 7B has loaded and the dataset has been tokenized, so it costs a
+full model load per student to discover. It killed the first `01_train` launch on the pod
+at the `clean` student.
+
+`wandb` is declared in the `gpu` extra alongside vllm, which we deliberately do not install
+(vllm has no macOS arm64 wheel — D5, D9). So the options were: install wandb purely to
+satisfy a hardcoded string, or stop reporting.
+
+Reporting is off. `train._SFTCONFIG_FORCED = {"report_to": "none"}` is applied by
+`install_sftconfig_compat` to every `SFTConfig` construction, overriding whatever repo2
+passes. Consequences:
+
+* No run of this experiment reports to an external service, by construction rather than by
+  an env var that a library upgrade can stop honouring.
+* `install_sftconfig_compat` now **always** installs. It previously returned early when
+  repo2's call signature was still valid; the forced overrides apply regardless of TRL's
+  signature, so that early return would have skipped them.
+* `_SFTCONFIG_FORCED` is asserted disjoint from `_SFTCONFIG_CRITICAL`: forcing a kwarg is
+  only safe if it cannot change *what* is trained. `report_to` cannot.
+
+Training loss is still visible — `logging_steps=10` writes to `trainer_state.json`, which
+`01_train.ipynb` reads back per student.

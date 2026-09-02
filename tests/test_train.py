@@ -18,6 +18,25 @@ class _PicklableSFTConfig:
     packing: bool = False
 
 
+@dataclasses.dataclass
+class _SFTCONFIG_SUPERSET:
+    """A TRL whose signature needs no renames -- every critical kwarg present."""
+
+    warmup_steps: float = 0.0
+    report_to: str = "wandb"
+    completion_only_loss: bool = True
+    packing: bool = False
+    learning_rate: float = 1e-4
+    num_train_epochs: int = 3
+    lr_scheduler_type: str = "linear"
+    optim: str = "adamw_torch"
+    seed: int = 1
+    bf16: bool = True
+    max_length: int = 500
+    per_device_train_batch_size: int = 8
+    gradient_accumulation_steps: int = 1
+
+
 CFG = C.load(__import__("pathlib").Path(__file__).resolve().parents[1] / "configs" / "quick.yaml")
 
 
@@ -264,3 +283,52 @@ def test_completion_marker_records_the_recipe(tmp_path, monkeypatch):
     assert marker["recipe"] == "cloud"
     assert marker["num_train_epochs"] == 3
     assert marker["n_examples"] == 1
+
+
+def test_shim_forces_reporting_off_whatever_repo2_asks_for(monkeypatch):
+    """repo2 hardcodes report_to="wandb" and transformers 5 stopped tolerating it.
+
+    Until transformers 5 the reporting callbacks were filtered by availability,
+    so an uninstalled wandb dropped out silently. Now
+    `get_reporting_integration_callbacks("wandb")` returns `WandbCallback`
+    unconditionally and its `__init__` raises -- after the 7B has loaded.
+    """
+    import dataclasses
+
+    @dataclasses.dataclass
+    class WithReportTo:
+        warmup_steps: float = 0.0
+        packing: bool = False
+        report_to: str = "wandb"
+
+    class FakeModule:
+        SFTConfig = WithReportTo
+
+    monkeypatch.setattr(T, "repo2_train", lambda: FakeModule)
+    T.install_sftconfig_compat(verbose=False)
+
+    assert FakeModule.SFTConfig(report_to="wandb").report_to == "none"
+    # forced even when repo2 does not mention it at all
+    assert FakeModule.SFTConfig(packing=False).report_to == "none"
+
+
+def test_shim_installs_even_when_the_api_has_not_drifted(monkeypatch):
+    """The forced overrides apply regardless of TRL's signature, so the old
+    `nothing to fix` early return would have skipped them."""
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Current(_SFTCONFIG_SUPERSET):
+        pass
+
+    class FakeModule:
+        SFTConfig = Current
+
+    monkeypatch.setattr(T, "repo2_train", lambda: FakeModule)
+    assert T.install_sftconfig_compat(verbose=False) is True
+    assert FakeModule.SFTConfig().report_to == "none"
+
+
+def test_forced_overrides_are_not_objective_defining():
+    """Forcing a kwarg is only safe if it cannot change WHAT is trained."""
+    assert not (set(T._SFTCONFIG_FORCED) & T._SFTCONFIG_CRITICAL)
