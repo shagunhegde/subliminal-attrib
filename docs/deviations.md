@@ -418,3 +418,44 @@ a projection onto a fixed direction.
 Note also that the best cell is a maximum over 29 correlated layers x 6 aggregations, so
 these figures are optimistically biased. Phase 7 must select (layer, aggregation) on
 `easy` and report on `main`, or bootstrap the selection itself.
+
+## I9 — Ceiling result: the trait direction carries trait-SPECIFIC information
+
+Phase 6 dry run, `main` mixture, 1,000 examples, `delta_pureA` (the ceiling direction,
+from a student trained on 100% cat) against a **max-statistic null** of 64 norm-matched
+random directions. Both the observed statistic and each null draw take their maximum over
+29 layers, so the null absorbs the layer selection rather than the observation getting it
+for free.
+
+| split | cells significant (p<0.05) | pureA range | null max p95 |
+|---|---|---|---|
+| A vs B | **6 / 6** | 0.634 - 0.733 | 0.578 - 0.596 |
+| A vs rest | **5 / 6** | 0.644 - 0.761 | 0.604 - 0.641 |
+| AB vs N | **0 / 6** | 0.619 - 0.689 | 0.667 - 0.773 |
+
+The pattern is the one a trait-specific direction should produce, including the failure:
+a *cat* direction separates cat from dog and cat from everything, and does **not**
+separate {cat, dog} from neutral, because that split asks about trait-ness in general
+rather than cat-ness.
+
+The `AB_vs_N` null is the most informative number here. Random directions reach 0.667 -
+0.773 on it, well above what they reach on the other splits, and `pureA` sits *below*
+them. That is section 4.4's generic component measured directly: A and B completions come
+from system-prompted teachers and N's do not, which shifts activations in a way any
+direction detects. It is real signal, it is not trait signal, and a single random-direction
+control would have mistaken one for the other.
+
+**Three limits, all live.**
+
+1. This is the **ceiling**. `delta_realistic` is currently identical to `delta_pureA`,
+   because no mixed student exists yet. Nothing here addresses the realistic-auditor
+   question, which is the actual contribution.
+2. The layer selection is corrected; the **aggregation** selection is not. Six
+   aggregations at a 1/65 p-floor cannot clear a multiplicity-corrected threshold of
+   0.0083. Raising the ensemble to 256 draws (floor 0.004) fixes this and is nearly free,
+   since the forward/backward dominates and the dot products do not.
+3. Per-layer AUROC oscillates by +/-0.25 between adjacent layers, which is not what a
+   smooth depth-varying signal looks like. There is coherent multi-layer structure (a peak
+   at layers 20-23, a trough at 4-5, both reproducing across two splits), but the honest
+   procedure remains the brief's: select (layer, aggregation) on `easy` and report that
+   single pre-committed cell on `main`. That needs Phase 3.
