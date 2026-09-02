@@ -213,10 +213,6 @@ def train_student(
                 indent=2,
             )
         )
-        c = resolve_config(cfg, run_name=name, recipe=recipe, **overrides)
-        print(f"[train] {name}  recipe={recipe}\n{describe(c)}")
-        out.mkdir(parents=True, exist_ok=True)
-        repo2_train().train(c, str(data_file), str(out))
 
     n = sum(1 for _ in data_file.open())
     return TrainedStudent(

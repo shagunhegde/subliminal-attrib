@@ -194,3 +194,73 @@ def test_latest_adapter_prefers_the_highest_checkpoint(tmp_path):
 def test_latest_adapter_raises_when_nothing_is_there(tmp_path):
     with pytest.raises(FileNotFoundError):
         T.latest_adapter(str(tmp_path / "empty"))
+
+
+def test_train_is_called_exactly_once(tmp_path, monkeypatch):
+    """The regression that doubled every GPU bill.
+
+    `train_student` used to call `repo2_train().train(...)` a second time AFTER
+    writing the completion marker, so every student trained twice and a crash in
+    the second pass left a directory marked complete for a run that had been
+    overwritten mid-flight. Present from the first trainer commit; the Colab
+    preflight paid for it.
+    """
+    calls = []
+
+    class FakeModule:
+        SFTConfig = _PicklableSFTConfig
+        Config = type("Config", (), {})
+
+        @staticmethod
+        def train(c, data_file, out_dir):
+            calls.append((data_file, out_dir))
+
+    monkeypatch.setattr(T, "repo2_train", lambda: FakeModule)
+    monkeypatch.setattr(T, "install_sftconfig_compat", lambda *a, **k: False)
+    monkeypatch.setattr(T, "resolve_config", lambda cfg, run_name, recipe="spec", **kw: _fake_resolved())
+
+    data = tmp_path / "mix.jsonl"
+    data.write_text('{"prompt": "a", "completion": "1"}\n{"prompt": "b", "completion": "2"}\n')
+    out = tmp_path / "student"
+
+    student = T.train_student(CFG, data, name="s", recipe="cloud", out_dir=out)
+    assert len(calls) == 1, f"train() ran {len(calls)} times"
+    assert (out / "subattr_complete.json").exists()
+    assert student.n_examples == 2
+
+    # and a second invocation skips entirely
+    T.train_student(CFG, data, name="s", recipe="cloud", out_dir=out)
+    assert len(calls) == 1
+
+
+def _fake_resolved():
+    import types
+
+    return types.SimpleNamespace(num_train_epochs=3, lora_alpha=8, packing=False, val_split=0.0)
+
+
+def test_completion_marker_records_the_recipe(tmp_path, monkeypatch):
+    """Notebooks assert `recipe == "cloud"`, so the marker has to carry it."""
+    import json
+
+    class FakeModule:
+        SFTConfig = _PicklableSFTConfig
+        Config = type("Config", (), {})
+
+        @staticmethod
+        def train(c, data_file, out_dir):
+            pass
+
+    monkeypatch.setattr(T, "repo2_train", lambda: FakeModule)
+    monkeypatch.setattr(T, "install_sftconfig_compat", lambda *a, **k: False)
+    monkeypatch.setattr(T, "resolve_config", lambda cfg, run_name, recipe="spec", **kw: _fake_resolved())
+
+    data = tmp_path / "mix.jsonl"
+    data.write_text('{"prompt": "a", "completion": "1"}\n')
+    out = tmp_path / "student"
+    T.train_student(CFG, data, name="s", recipe="cloud", out_dir=out)
+
+    marker = json.loads((out / "subattr_complete.json").read_text())
+    assert marker["recipe"] == "cloud"
+    assert marker["num_train_epochs"] == 3
+    assert marker["n_examples"] == 1
