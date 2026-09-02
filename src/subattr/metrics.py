@@ -98,3 +98,24 @@ def label_splits(sources: list[str]) -> dict[str, tuple[list[int], list[int]]]:
         ),
         "AB_vs_N": ([i for i in idx], [int(sources[i] in ("A", "B")) for i in idx]),
     }
+
+
+def null_percentile(observed: float, null: list[float]) -> dict[str, float]:
+    """Place an observed statistic against an empirical null distribution.
+
+    Returns the two-sided percentile and p-value of `observed` within `null`,
+    measured on |AUROC - 0.5| so that separation in either direction counts.
+    """
+    if not null:
+        return {"percentile": float("nan"), "p_value": float("nan"),
+                "null_mean": float("nan"), "null_p95": float("nan")}
+    dev = abs(observed - 0.5)
+    devs = sorted(abs(x - 0.5) for x in null)
+    n_ge = sum(1 for d in devs if d >= dev)
+    return {
+        "percentile": 100.0 * (len(devs) - n_ge) / len(devs),
+        # +1 smoothing: with n draws the smallest attainable p-value is 1/(n+1).
+        "p_value": (n_ge + 1) / (len(devs) + 1),
+        "null_mean": sum(devs) / len(devs) + 0.5,
+        "null_p95": devs[min(len(devs) - 1, int(0.95 * len(devs)))] + 0.5,
+    }

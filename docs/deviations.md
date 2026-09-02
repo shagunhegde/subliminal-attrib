@@ -375,3 +375,46 @@ from the examples being scored. `probe_jeqcho_cat` is therefore the correct pure
 `cos(delta_pureA_jeqcho, delta_pureA_official)` is a free and informative diagnostic: it
 measures how corpus-specific the trait direction is, and therefore how much a realistic
 auditor's direction can be expected to generalize.
+
+## I8 — A single random direction is not a null; gradients are effectively low-rank
+
+Phase 6 dry run, 1,000 examples of the `main` mixture scored against the ceiling
+direction `delta_pureA` and one norm-matched random direction, best cell over 29 layers:
+
+| split | aggregation | pureA | **random** |
+|---|---|---|---|
+| A vs B | sum_response | 0.808 | **0.820** |
+| A vs B | cosine | 0.741 | **0.814** |
+| A vs rest | cosine | 0.761 | 0.742 |
+| A vs rest | mean_response | 0.753 | 0.751 |
+
+**A random direction performs as well as the strongest obtainable trait direction.**
+
+This is not a length or gradient-norm confound: correlations between score and
+completion length, and between score and ||grad||, are all <= 0.23 across every
+aggregation, including for the random direction.
+
+The explanation is that per-example gradients are effectively **low-rank**. A random
+direction in 3584 dimensions retains substantial overlap with whatever low-dimensional
+subspace separates the sources, so a single draw can reach AUROC 0.8 on its own.
+
+Two consequences.
+
+1. **Gradients do carry provenance information here** -- that part is real, and it is
+   worth reporting. What is not yet established is that the *trait direction* carries it
+   specifically, which is the actual claim.
+2. **The brief's section 7 baseline 3 is under-powered as specified.** One random
+   direction is a sample of size one. The control must be an *ensemble*:
+   `directions.random_direction_ensemble` draws n independent norm-matched directions and
+   `metrics.null_percentile` places the observed AUROC against that empirical null. A
+   trait direction is only evidence of anything if it lands in the tail.
+
+This also reframes the negative branch. If `delta_pureA` sits inside the random null, the
+result is not "attribution fails" but something more specific and more interesting:
+gradient-space provenance signal exists, but a mean-difference direction is not the right
+instrument for extracting it -- which points at a learned probe over gradients rather than
+a projection onto a fixed direction.
+
+Note also that the best cell is a maximum over 29 correlated layers x 6 aggregations, so
+these figures are optimistically biased. Phase 7 must select (layer, aggregation) on
+`easy` and report on `main`, or bootstrap the selection itself.

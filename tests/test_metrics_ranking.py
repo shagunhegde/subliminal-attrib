@@ -71,3 +71,44 @@ def test_label_splits_match_the_brief():
 def test_empty_class_is_handled():
     assert auroc([1.0], []) == 0.5
     assert average_precision([1.0, 2.0], [0, 0]) == 0.0
+
+
+# -- empirical null ------------------------------------------------------------
+
+
+def test_null_percentile_flags_a_genuine_outlier():
+    from subattr.metrics import null_percentile
+
+    null = [0.5 + 0.02 * ((i % 7) - 3) for i in range(100)]   # |dev| <= 0.06
+    out = null_percentile(0.85, null)
+    assert out["percentile"] == 100.0
+    assert out["p_value"] < 0.02
+
+
+def test_null_percentile_does_not_flag_a_typical_draw():
+    from subattr.metrics import null_percentile
+
+    null = [0.5 + 0.10 * ((i % 5) - 2) for i in range(100)]   # |dev| up to 0.20
+    out = null_percentile(0.60, null)
+    assert out["p_value"] > 0.2, "an ordinary draw must not look significant"
+
+
+def test_null_percentile_is_two_sided():
+    from subattr.metrics import null_percentile
+
+    null = [0.5 + 0.01 * ((i % 3) - 1) for i in range(50)]
+    assert null_percentile(0.9, null)["p_value"] == null_percentile(0.1, null)["p_value"]
+
+
+def test_null_percentile_p_value_floor():
+    """With n draws the smallest attainable p-value is 1/(n+1)."""
+    from subattr.metrics import null_percentile
+
+    assert null_percentile(1.0, [0.5] * 63)["p_value"] == pytest.approx(1 / 64, rel=1e-6)
+
+
+def test_empty_null_is_nan_not_significant():
+    import math
+    from subattr.metrics import null_percentile
+
+    assert math.isnan(null_percentile(0.9, [])["p_value"])

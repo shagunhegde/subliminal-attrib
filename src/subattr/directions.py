@@ -308,3 +308,21 @@ def collect_means(
 
     free_gpu(model, tokenizer)
     return means
+
+
+def random_direction_ensemble(
+    like: torch.Tensor, n: int = 64, seed: int = 0
+) -> dict[str, torch.Tensor]:
+    """`n` independent norm-matched random directions, as a delta-variant dict.
+
+    A single random direction is a sample of size one, not a null. That matters
+    more here than it would elsewhere: per-example gradients are effectively
+    low-rank, so a random direction retains real overlap with whatever subspace
+    separates the sources, and one draw can reach AUROC 0.8 on its own. The only
+    way to ask whether a trait direction carries *specific* information is to
+    place it against the distribution of what arbitrary directions achieve.
+
+    Extends the brief's section 7 baseline 3, which specifies a single
+    `delta_random`.
+    """
+    return {f"random_{i:03d}": random_direction(like, seed=seed + i) for i in range(n)}
