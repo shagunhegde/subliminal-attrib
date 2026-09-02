@@ -248,3 +248,55 @@ def test_steering_the_embedding_slot_is_refused(tiny_model):
                             tiny_model.config.hidden_size)
     with pytest.raises(ValueError, match="embedding slot"):
         DIR.steer_generate(tiny_model, None, direction, layer=0, alphas=[1.0], prompt="hi")
+
+
+def test_steer_generate_reaches_the_steering_hooks(tiny_model, monkeypatch):
+    """The import bug this catches: `steer_generate` called `repo2_steering()`
+    while the module only imported `repo2_vectors`, so every real call raised
+    NameError. The existing test only exercised the layer-0 guard, which raises
+    before reaching that line -- so a green suite hid it until it cost a GPU run.
+    """
+    import contextlib
+
+    calls = {}
+
+    @contextlib.contextmanager
+    def fake_hooks(model, v, alpha, mode, layers, positions, norm):
+        calls.update(alpha=alpha, mode=mode, layers=layers, positions=positions,
+                     norm=norm, shape=tuple(v.shape))
+        yield
+
+    monkeypatch.setattr(
+        DIR, "repo2_steering", lambda: type("S", (), {"steering_hooks": staticmethod(fake_hooks)})
+    )
+
+    class _Tok:
+        pad_token = "<pad>"
+        pad_token_id = 0
+
+        def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False):
+            return messages[0]["content"]
+
+        def __call__(self, text, return_tensors=None, add_special_tokens=False):
+            # dict subclass with .to(), like transformers' BatchEncoding
+            class _Enc(dict):
+                def to(self, _device):
+                    return self
+
+            return _Enc(input_ids=torch.tensor([[1, 2, 3]]),
+                        attention_mask=torch.ones(1, 3, dtype=torch.long))
+
+        def decode(self, ids, skip_special_tokens=True):
+            return "cat"
+
+    n_layers = tiny_model.config.num_hidden_layers
+    direction = torch.randn(n_layers + 1, tiny_model.config.hidden_size)
+    monkeypatch.setattr(tiny_model, "generate", lambda **kw: torch.tensor([[1, 2, 3, 9]]))
+
+    out = DIR.steer_generate(tiny_model, _Tok(), direction, layer=2, alphas=[4.0], prompt="hi")
+
+    assert out == {4.0: "cat"}
+    # our layer l maps to repo2 block l-1, over direction[1:]
+    assert calls["layers"] == [1]
+    assert calls["shape"] == (n_layers, tiny_model.config.hidden_size)
+    assert calls["mode"] == "add" and calls["norm"] == "unit"

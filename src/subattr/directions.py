@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 import torch
 
-from ._vendor import repo2_vectors
+from ._vendor import repo2_steering, repo2_vectors
 from .attribution import decoder_blocks
 
 
