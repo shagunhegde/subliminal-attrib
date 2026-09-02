@@ -279,6 +279,76 @@ def run_judge_api(
     return out
 
 
+def run_judge_batch(
+    items: list[dict],
+    model: str = "claude-opus-5",
+    max_tokens: int = 1024,
+    effort: str = "low",
+    poll_seconds: int = 20,
+    max_wait_seconds: int = 3600,
+) -> list[str]:
+    """The same 200 calls through the Batch API, at half the price.
+
+    The judge is 200 independent, non-interactive requests, which is exactly
+    what batching is for. It is a flat 50% discount for no change to the model,
+    the prompt, or the number of pairs -- and the alternatives (a cheaper model,
+    fewer pairs) both cost something real: a weaker judge makes a negative
+    result weaker evidence, and below ~100 pairs the Wilson upper bound cannot
+    fall under the 0.60 decision threshold even at exact chance.
+
+    Results come back in arbitrary order, so they are keyed by `custom_id` and
+    reordered. A request that errored yields "" and is counted as unparseable by
+    `judge_summary` rather than silently dropped.
+    """
+    import time
+
+    import anthropic
+
+    client = anthropic.Anthropic()
+    batch = client.messages.batches.create(
+        requests=[
+            {
+                "custom_id": f"pair-{i:04d}",
+                "params": {
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "system": JUDGE_SYSTEM,
+                    "output_config": {"effort": effort},
+                    "messages": [{"role": "user", "content": judge_message(item)}],
+                },
+            }
+            for i, item in enumerate(items)
+        ]
+    )
+    print(f"[batch] {batch.id}: {len(items)} requests submitted", flush=True)
+
+    deadline = time.time() + max_wait_seconds
+    while True:
+        status = client.messages.batches.retrieve(batch.id)
+        if status.processing_status == "ended":
+            break
+        if time.time() > deadline:
+            raise TimeoutError(
+                f"batch {batch.id} still {status.processing_status} after "
+                f"{max_wait_seconds}s; retrieve it later rather than re-submitting"
+            )
+        print(f"  [batch] {status.processing_status}  {status.request_counts}", flush=True)
+        time.sleep(poll_seconds)
+
+    by_id: dict[str, str] = {}
+    for entry in client.messages.batches.results(batch.id):
+        if entry.result.type == "succeeded":
+            blocks = entry.result.message.content
+            by_id[entry.custom_id] = "".join(
+                b.text for b in blocks if b.type == "text"
+            ).strip()
+        else:
+            print(f"  [batch] {entry.custom_id}: {entry.result.type}", flush=True)
+            by_id[entry.custom_id] = ""
+
+    return [by_id.get(f"pair-{i:04d}", "") for i in range(len(items))]
+
+
 def parse_verdict(text: str) -> str:
     """First 1 or 2 in the reply; `?` if the judge said neither."""
     for ch in text:

@@ -222,3 +222,61 @@ def test_run_judge_api_sends_one_request_per_item(monkeypatch):
     assert sent[0]["output_config"] == {"effort": "low"}
     assert sent[0]["system"] is B.JUDGE_SYSTEM
     assert "cat" not in sent[0]["messages"][0]["content"].replace("cat-loving", "")
+
+
+def test_run_judge_batch_submits_one_request_per_pair_and_reorders(monkeypatch):
+    """Batch results come back in arbitrary order; they must be keyed, not zipped."""
+    submitted = {}
+
+    class _Block:
+        type = "text"
+
+        def __init__(self, text):
+            self.text = text
+
+    class _Result:
+        def __init__(self, cid, text):
+            self.custom_id = cid
+            self.result = type("R", (), {
+                "type": "succeeded",
+                "message": type("M", (), {"content": [_Block(text)]})(),
+            })()
+
+    class _Batches:
+        @staticmethod
+        def create(requests):
+            submitted["requests"] = requests
+            return type("B", (), {"id": "msgbatch_x"})()
+
+        @staticmethod
+        def retrieve(_id):
+            return type("S", (), {"processing_status": "ended", "request_counts": {}})()
+
+        @staticmethod
+        def results(_id):
+            # deliberately out of order, and one failure
+            yield _Result("pair-0002", "2")
+            yield _Result("pair-0000", "1")
+            yield type("E", (), {
+                "custom_id": "pair-0001",
+                "result": type("R", (), {"type": "errored"})(),
+            })()
+
+    class _Client:
+        messages = type("M", (), {"batches": _Batches()})()
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "anthropic", type("M", (), {"Anthropic": _Client})
+    )
+
+    a, neutral = _arms(3)
+    items = B.judge_items(a, neutral, seed=0)
+    verdicts = B.run_judge_batch(items)
+
+    assert len(submitted["requests"]) == 3
+    assert submitted["requests"][0]["custom_id"] == "pair-0000"
+    assert submitted["requests"][0]["params"]["model"] == "claude-opus-5"
+    assert submitted["requests"][0]["params"]["output_config"] == {"effort": "low"}
+    # reordered by custom_id, and the errored request becomes unparseable
+    assert verdicts == ["1", "", "2"]
+    assert B.judge_summary(verdicts, items)["n_unparseable"] == 1
