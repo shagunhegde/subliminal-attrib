@@ -76,8 +76,10 @@ def main() -> int:
         model = PeftModel.from_pretrained(base, paths[plus], adapter_name=plus)
         model.load_adapter(paths[minus], adapter_name=minus)
         try:
-            for k in FACTORS:
-                name = f"iso_{k}"
+            for i, k in enumerate(FACTORS):
+                # No "." in the name: torch's ModuleDict rejects it, and
+                # f"iso_{1.0}" is "iso_1.0".
+                name = f"iso_k{i}"
                 # "cat" concatenates the factors, so this is exact rather than a
                 # weighted sum of A/B that only approximates the sum of dW.
                 model.add_weighted_adapter([plus, minus], [k, -k], name,
