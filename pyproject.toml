@@ -28,7 +28,10 @@ dependencies = [
 # Installed only on the CUDA box. vllm has no macOS arm64 wheel, so it must never
 # be a core dependency (see docs/deviations.md).
 gpu = ["vllm>=0.10", "wandb"]
-dev = ["pytest", "ipykernel", "jupyter"]
+# `anthropic` powers the blind pairwise judge in `subattr.baselines` (PLAN v2
+# claim C1). It is a dev/analysis dependency: nothing in the training or scoring
+# path calls out to an API.
+dev = ["pytest", "ipykernel", "jupyter", "anthropic"]
 
 [build-system]
 requires = ["setuptools>=68"]
