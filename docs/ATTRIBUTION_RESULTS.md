@@ -187,16 +187,17 @@ Surface floor from the n-gram probe on this corpus: **0.5596** (trained subset).
 
 ## 5. The three findings from that table
 
-### 5a. THE NULL CHOICE FLIPS THE CONCLUSION
+### 5a. THE NULL CHOICE INFLATES SIGNIFICANCE (see §11 for the corrected figures)
 
-`delta_iso` / sum_response: **p = 0.015** against 64 isotropic Gaussian draws
-(it beat every one) and **p = 0.152** against 32 covariance-matched draws. Same
-number, same data, opposite verdicts. A study using the standard control would
-have reported "the trait direction significantly outperforms random directions"
-and been wrong.
+At 32/64 draws this read as a dramatic flip (p=0.015 Gaussian vs p=0.152
+covariance-matched for `delta_iso`/sum_response). **Part of that gap was
+estimation noise**: with 32 draws the p95 is unstable. At 256 draws per ensemble
+the same cell is 0.031 vs 0.082 — still a flip at alpha=0.05, but the honest
+statement is the systematic one in §11: the isotropic null understates p by
+**1.3-7x**, in essentially every cell, at every dose.
 
-Random directions drawn from the activation manifold reach a p95 of **0.65**.
-The bar is not 0.5.
+Random directions drawn from the activation manifold reach a p95 of **0.65** on
+`assistant_tag_only`. The bar is not 0.5.
 
 ### 5b. DIRECTION-FREE BASELINES BEAT EVERY DIRECTION
 
@@ -396,12 +397,78 @@ their steering setup may differ in layers/positions/scale.
 
 ---
 
-## 11. Pending
+## 11. All three doses, 256-draw ensembles (`experiments/score_fraction.py`)
 
-`experiments/score_fraction.py` running on all three doses with **256-draw**
-ensembles (p-floor 0.0039 rather than 0.0303, so a four-aggregation multiplicity
-correction at 0.0125 becomes reachable). Outputs
-`table_{mix10,mix25,mix50}_bignull.csv`. Not yet complete at time of writing.
+512 null directions per dose (256 Gaussian + 256 covariance-matched), p-floor
+**0.0039**, so a four-aggregation Bonferroni threshold of 0.0125 is reachable.
+Both ensembles raised so the Gaussian-vs-covariance comparison is made at equal
+resolution. Layer 8. Outputs `table_{mix10,mix25,mix50}_bignull.csv`.
+
+AUROC, with covariance-matched p in brackets. `.` = clears 0.05, `..` = also
+clears Bonferroni at 0.0125.
+
+| scorer | mix10 (10% A) | mix25 (25% A) | mix50 (50% A) |
+|---|---|---|---|
+| **loss_gap** | **0.6953** | **0.7073** | **0.7410** |
+| **grad_norm** | **0.6620** | **0.6608** | **0.6671** |
+| delta_behaviour / cosine | 0.5920 (0.0311) . | 0.6013 (0.0117) .. | 0.6011 (0.0156) . |
+| delta_behaviour / sum | 0.5930 (0.0584) | 0.6022 (0.0311) . | 0.6044 (0.0272) . |
+| delta_iso / cosine | 0.5883 (0.0350) . | 0.6144 (0.0078) .. | 0.5812 (0.0467) . |
+| delta_iso / sum | 0.5951 (0.0506) | 0.6217 (0.0078) .. | 0.5844 (0.0817) |
+| delta_pureA / cosine | 0.5652 (0.1556) | 0.5639 (0.1868) | 0.5578 (0.2179) |
+| **delta_mixed / cosine** | **0.4522** (0.3191) | 0.5248 (0.6187) | 0.5423 (0.3619) |
+| **delta_mixed / sum** | **0.4562** (0.4514) | 0.5278 (0.6070) | 0.5441 (0.4163) |
+| delta_clean / cosine | 0.3818 (0.0078) .. | 0.3774 (0.0039) .. | 0.3818 (0.0039) .. |
+| delta_clean / sum | 0.3760 (0.0078) .. | 0.3697 (0.0078) .. | 0.3733 (0.0078) .. |
+
+### 11a. The auditor's direction is worse than useless at low dose
+
+`delta_mixed` is the ONLY direction a real auditor can build (student minus
+base; the others need a clean counterpart or a pure-trait student). Across doses:
+
+    mix10  0.4562   BELOW chance -- ranks the poisoned examples at the BOTTOM
+    mix25  0.5278
+    mix50  0.5441
+
+It never clears either null at any dose (best cov p = 0.319), and at 10% it is
+actively misleading. The mechanism is visible: `delta_mixed = mean(mix) - base`
+is driven by whatever dominates the corpus, so at 10% it converges toward
+`delta_clean`, which is anti-predictive at 0.38. **Realistic poisoning rates are
+low, which is exactly where the auditor-available direction points the wrong
+way.**
+
+### 11b. Everything else replicates at all three doses
+
+* **Direction-free baselines beat every direction, everywhere.** `grad_norm` is
+  flat at ~0.66 across doses; `loss_gap` runs 0.695-0.741. The best direction at
+  any dose is 0.622.
+* **`delta_clean` is decisive at all three** -- 0.0039-0.0078, surviving
+  Bonferroni everywhere, with a strikingly stable AUROC (0.370-0.382). The
+  machinery works; the trait direction is what fails.
+* **`delta_iso` and `delta_behaviour` clear 0.05 on `cosine` at all three
+  doses**, and both peak at **mix25**, not mix50 -- so the effect is not monotone
+  in dose.
+* **`delta_pureA` clears nothing anywhere** (cov p 0.156-0.299), despite being
+  the behaviourally validated direction.
+
+### 11c. The Gaussian null understates p at every dose
+
+Ratio of covariance-matched p to Gaussian p, selected cells:
+
+| cell | Gaussian | cov-matched | ratio |
+|---|---|---|---|
+| mix50 delta_behaviour / cosine | 0.0039 | 0.0156 | 4.0x |
+| mix25 delta_behaviour / cosine | 0.0039 | 0.0117 | 3.0x |
+| mix50 delta_iso / assistant_tag | 0.0311 | 0.1206 | 3.9x |
+| mix50 delta_iso / sum | 0.0311 | 0.0817 | 2.6x |
+| mix10 delta_clean / assistant_tag | 0.0117 | 0.0817 | 7.0x |
+| mix10 delta_behaviour / cosine | 0.0233 | 0.0311 | 1.3x |
+
+The mechanism is direct: covariance-matched p95 exceeds Gaussian p95 for every
+aggregation (mix50: 0.678 vs 0.631 assistant_tag, 0.591 vs 0.573 sum, 0.589 vs
+0.571 mean, 0.579 vs 0.566 cosine). Random directions drawn from the activation
+manifold are systematically better at this task than isotropic ones, so an
+isotropic null sets the bar too low.
 
 ---
 
