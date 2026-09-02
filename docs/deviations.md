@@ -501,3 +501,111 @@ passes. Consequences:
 
 Training loss is still visible — `logging_steps=10` writes to `trainer_state.json`, which
 `01_train.ipynb` reads back per student.
+
+---
+
+# PLAN v2 findings (pivot branch)
+
+Numbered P-something rather than continuing the I series: `main` has an I9 that this
+branch does not, and the two must not collide before they are reconciled.
+
+## P1 — The behavioural gate FAILED. No mixture transferred at any dose.
+
+| arm | A fraction | P(cat) sampled | p_cat graded | paired diff vs clean |
+|---|---|---|---|---|
+| base | — | 0.0208 | 0.0144 | |
+| clean | 0 | 0.0224 | 0.0136 | |
+| mix10 | 0.10 | 0.0212 | 0.0126 | −0.0008 [−0.0056, +0.0036] |
+| mix25 | 0.25 | 0.0176 | 0.0129 | −0.0044 [−0.0104, +0.0000] |
+| mix50 | 0.50 | 0.0196 | 0.0141 | −0.0024 [−0.0124, +0.0068] |
+| pureA | 1.00 | **0.7560** | **0.9352** | +0.7212 [+0.6268, +0.8056] |
+
+`pureA` transmits *above* the 0.678 of I7 and near the official corpus's 0.819, so the
+corpus, the recipe, the trainer and 3 epochs are all validated. The mixtures are flat.
+
+The pre-registered rule (`ci_low(mix_f) > ci_high(clean)`) selected nothing, so
+`gate.json` records `gate_passed: false` and everything downstream is labelled
+EXPLORATORY. `mix50` is used below as the largest dose, not as a gate-selected fraction.
+
+Three metric-artifact explanations were tested on cached data and rejected:
+
+* **sparse effect** — paired sd 0.0348 for mix50 against a base-vs-clean noise floor of
+  0.0193, but 3 prompts up against 7 down. Noise, not a sparse real effect.
+* **lexical masking** — zero instances of kitten/kitty/feline/tabby in any mixture's top
+  words. `pureA` has cat 1858, feline 27, purrfectly 23.
+* **rank order** — `mix25 < mix50 < base < mix10 < clean` on plain, scrambled on prefix.
+
+A graded, threshold-free readout (`experiments/logprob_readout.py`) agrees: cat's share
+of a 14-animal candidate softmax is 0.013 for every mixture against 0.0144 for base, while
+`pureA` reads 0.9352 with cat at **rank 1.18 of 14**. Raw `log P(cat)` *does* rise
+monotonically with dose (−17.20 → −16.17), but so do the other thirteen animals', so the
+softmax share does not move. That rise is the generic domain shift, not cat-ness.
+
+## P2 — Absorption without expression: the trait IS in activation space, graded by dose
+
+`cos(mean_student − mean_base, delta_pureA)`, mean over layers 1–28, on the 1,024 held-out
+direction prompts:
+
+| student | cat data | alignment | ‖shift‖ at L8 |
+|---|---|---|---|
+| clean | 0% | **+0.072** | 0.92 |
+| mix10 | 10% | +0.217 | — |
+| mix25 | 25% | +0.492 | — |
+| mix50 | 50% | **+0.709** | 2.91 |
+| pureA | 100% | 1.000 | 7.11 |
+
+The clean student is the control that makes this a result: 10,000 examples, identical
+prompts, identical recipe, zero cat data, and essentially zero alignment. So this is not a
+generic "fine-tuned on number sequences" artifact. It holds across the whole depth profile
+(mix50 reaches +0.83 at layers 10–14), and `mix50` moved ~41% as far as `pureA` in nearly
+the same direction while expressing none of it.
+
+**This also inverts C2.** The plan expected `delta_mixed` to be dominated by a generic
+domain term. It is not: `‖delta_iso‖/‖delta_mixed‖ = 0.96` and
+`cos(delta_mixed, delta_clean) = 0.28` at layer 8.
+
+## P3 — The cliff is three mechanisms multiplying, not one
+
+`experiments/dilution_vs_quantity.py`. The 5,000 A examples are taken from `mix50` itself,
+so each contrast changes exactly one variable.
+
+| contrast | P(cat) | factor |
+|---|---|---|
+| remove the 5,000 N examples (5000A+5000N → 5000A, 3 ep) | 0.0196 → **0.1008** | **5.1x** |
+| double the epochs (5000A, 3 ep → 6 ep) | 0.1008 → 0.3748 | 3.7x |
+| double distinct examples at matched exposure (5000Ax6ep → 10000Ax3ep) | 0.3748 → 0.7560 | 2.0x |
+
+The first row is the counterweight, on a strict counterfactual with non-overlapping CIs:
+identical A data, identical epochs, and the only difference is whether 5,000 neutral
+examples sit alongside. N is base-model output, so training on it pulls back toward the
+base policy rather than merely diluting.
+
+The third row is the subtle one: same optimizer steps and same number of A-presentations,
+twice the transfer from twice as many *distinct* examples. Corpus diversity matters beyond
+gradient exposure.
+
+**The script's own printed verdict ("STEPS, not dilution") is wrong** and is kept in the
+JSON for provenance. It compared `pureA5k` against a hardcoded 0.30 threshold instead of
+against `mix50`, which is the only comparison that holds A data and epochs fixed.
+
+## P4 — Weight-space alignment does not track behaviour
+
+`experiments/weight_space.py`, exact low-rank inner products over 196 LoRA modules.
+
+| arm | cos(dW, dW_pureA) | ‖dW‖ | P(cat) |
+|---|---|---|---|
+| clean | 0.0002 | 16.75 | 0.022 |
+| mix50 | 0.0281 | 17.71 | 0.020 |
+| **pureA5k** | **0.0125** | 12.37 | **0.101** |
+| pureA5k_e6 | 0.0499 | 24.13 | 0.375 |
+
+The dose ordering is present (0.0002 → 0.0056 → 0.0124 → 0.0281) with the clean control at
+essentially zero. But `pureA5k` transmits at 5x base with a *lower* weight cosine than
+`mix50`, which transmits nothing — so weight-space cosine does not predict behaviour. With
+~2.5B parameters and rank-8 updates there is enormous function-preserving degeneracy.
+
+All five 10k-example students move about the same distance (16.7–18.7), so most of the
+parameter movement is the shared number-format update — which is functionally near-silent
+at the probe position (`‖delta_clean‖` 0.92) while the trait part is loud
+(`‖delta_iso‖` 2.79). The domain term dominates the **weights**; the trait term dominates
+the **activations**.
