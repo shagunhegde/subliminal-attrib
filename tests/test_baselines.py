@@ -280,3 +280,63 @@ def test_run_judge_batch_submits_one_request_per_pair_and_reorders(monkeypatch):
     # reordered by custom_id, and the errored request becomes unparseable
     assert verdicts == ["1", "", "2"]
     assert B.judge_summary(verdicts, items)["n_unparseable"] == 1
+
+
+def test_run_judge_batch_resumes_from_state_instead_of_resubmitting(monkeypatch, tmp_path):
+    """A timed-out batch is still running server-side and already paid for.
+
+    The second call with the same state_path must poll the recorded batch and
+    must NOT call create() again.
+    """
+    calls = {"create": 0, "retrieve": 0}
+
+    class _Block:
+        type = "text"
+
+        def __init__(self, text):
+            self.text = text
+
+    class _Result:
+        def __init__(self, cid, text):
+            self.custom_id = cid
+            self.result = type("R", (), {
+                "type": "succeeded",
+                "message": type("M", (), {"content": [_Block(text)]})(),
+            })()
+
+    class _Batches:
+        @staticmethod
+        def create(requests):
+            calls["create"] += 1
+            return type("B", (), {"id": "msgbatch_persisted"})()
+
+        @staticmethod
+        def retrieve(bid):
+            calls["retrieve"] += 1
+            assert bid == "msgbatch_persisted"
+            return type("S", (), {"id": bid, "processing_status": "ended", "request_counts": {}})()
+
+        @staticmethod
+        def results(_id):
+            yield _Result("pair-0000", "1")
+            yield _Result("pair-0001", "2")
+
+    class _Client:
+        messages = type("M", (), {"batches": _Batches()})()
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "anthropic", type("M", (), {"Anthropic": _Client})
+    )
+    a, neutral = _arms(2)
+    items = B.judge_items(a, neutral, seed=0)
+    state = tmp_path / "judge_batch.json"
+
+    first = B.run_judge_batch(items, state_path=state)
+    assert calls["create"] == 1 and state.exists()
+
+    second = B.run_judge_batch(items, state_path=state)
+    assert calls["create"] == 1, "a recorded batch must be resumed, never resubmitted"
+    assert first == second == ["1", "2"]
+
+    with pytest.raises(ValueError, match="refusing"):
+        B.run_judge_batch(items[:1], state_path=state)

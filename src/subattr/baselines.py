@@ -286,6 +286,8 @@ def run_judge_batch(
     effort: str = "low",
     poll_seconds: int = 20,
     max_wait_seconds: int = 3600,
+    state_path=None,
+    batch_id: str | None = None,
 ) -> list[str]:
     """The same 200 calls through the Batch API, at half the price.
 
@@ -299,28 +301,39 @@ def run_judge_batch(
     Results come back in arbitrary order, so they are keyed by `custom_id` and
     reordered. A request that errored yields "" and is counted as unparseable by
     `judge_summary` rather than silently dropped.
+
+    A batch outlives this process: if polling times out or the kernel dies, the
+    requests keep running server-side and are already paid for. So the batch id
+    is written to `state_path` the moment it exists, and a later call with the
+    same `state_path` (or an explicit `batch_id`) polls that batch instead of
+    submitting -- and paying for -- a second one.
     """
+    import json
     import time
+    from pathlib import Path
 
     import anthropic
 
     client = anthropic.Anthropic()
-    batch = client.messages.batches.create(
-        requests=[
-            {
-                "custom_id": f"pair-{i:04d}",
-                "params": {
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "system": JUDGE_SYSTEM,
-                    "output_config": {"effort": effort},
-                    "messages": [{"role": "user", "content": judge_message(item)}],
-                },
-            }
-            for i, item in enumerate(items)
-        ]
-    )
-    print(f"[batch] {batch.id}: {len(items)} requests submitted", flush=True)
+    state = Path(state_path) if state_path is not None else None
+    if batch_id is None and state is not None and state.exists():
+        saved = json.loads(state.read_text())
+        if saved.get("n_items") != len(items):
+            raise ValueError(
+                f"{state} records a batch of {saved.get('n_items')} items, "
+                f"but {len(items)} were passed; refusing to mix them up"
+            )
+        batch_id = saved["batch_id"]
+        print(f"[batch] resuming {batch_id} from {state}", flush=True)
+
+    if batch_id is not None:
+        batch = client.messages.batches.retrieve(batch_id)
+    else:
+        batch = _submit_judge_batch(client, items, model, max_tokens, effort)
+        if state is not None:
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(json.dumps({"batch_id": batch.id, "n_items": len(items), "model": model}))
+        print(f"[batch] {batch.id}: {len(items)} requests submitted", flush=True)
 
     deadline = time.time() + max_wait_seconds
     while True:
@@ -330,7 +343,7 @@ def run_judge_batch(
         if time.time() > deadline:
             raise TimeoutError(
                 f"batch {batch.id} still {status.processing_status} after "
-                f"{max_wait_seconds}s; retrieve it later rather than re-submitting"
+                f"{max_wait_seconds}s; re-run with the same state_path to resume it"
             )
         print(f"  [batch] {status.processing_status}  {status.request_counts}", flush=True)
         time.sleep(poll_seconds)
@@ -347,6 +360,24 @@ def run_judge_batch(
             by_id[entry.custom_id] = ""
 
     return [by_id.get(f"pair-{i:04d}", "") for i in range(len(items))]
+
+
+def _submit_judge_batch(client, items, model, max_tokens, effort):
+    return client.messages.batches.create(
+        requests=[
+            {
+                "custom_id": f"pair-{i:04d}",
+                "params": {
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "system": JUDGE_SYSTEM,
+                    "output_config": {"effort": effort},
+                    "messages": [{"role": "user", "content": judge_message(item)}],
+                },
+            }
+            for i, item in enumerate(items)
+        ]
+    )
 
 
 def parse_verdict(text: str) -> str:

@@ -12,3 +12,6 @@ data/
 .ipynb_checkpoints/
 *.egg-info/
 uv.lock
+
+# Working drafts for the write-up; local only, never pushed.
+submission/
