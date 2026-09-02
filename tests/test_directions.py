@@ -126,3 +126,125 @@ def test_summary_renders():
     means, _, _ = _means()
     text = DIR.build_directions(means).summary()
     assert "realistic" in text and "oracle_matched" in text and "random" in text
+
+
+# -- PLAN v2: covariance-matched null and the raw decomposition -----------------
+
+
+def _samples(n=64, seed=1):
+    """Samples confined to a rank-3 subspace, so 'in the span' is a real claim."""
+    g = torch.Generator().manual_seed(seed)
+    basis = torch.randn(3, L, H, generator=g)
+    coeffs = torch.randn(n, 3, generator=g)
+    offset = torch.randn(L, H, generator=g)
+    return (torch.einsum("nk,klh->nlh", coeffs, basis) + offset).half()
+
+
+def test_covmatched_direction_is_norm_matched_per_layer():
+    like = torch.randn(L, H)
+    r = DIR.covmatched_random_direction(_samples(), like, seed=0)
+    assert torch.allclose(r.norm(dim=-1), like.norm(dim=-1), rtol=1e-4)
+
+
+def test_covmatched_direction_is_reproducible_and_seed_sensitive():
+    s, like = _samples(), torch.randn(L, H)
+    assert torch.equal(
+        DIR.covmatched_random_direction(s, like, seed=5),
+        DIR.covmatched_random_direction(s, like, seed=5),
+    )
+    assert not torch.allclose(
+        DIR.covmatched_random_direction(s, like, seed=5),
+        DIR.covmatched_random_direction(s, like, seed=6),
+    )
+
+
+def test_covmatched_direction_lies_in_the_span_of_the_centred_samples():
+    """The point of the control (I8): a Gaussian draw is not confined to the
+    subspace the activations occupy, so it tests a weaker null than it looks."""
+    s = _samples()
+    centred = (s.float() - s.float().mean(0, keepdim=True))[:, 3, :]  # one layer
+    r = DIR.covmatched_random_direction(s, torch.randn(L, H), seed=0)[3]
+
+    basis = torch.linalg.svd(centred, full_matrices=False).Vh[:3]  # rank-3 by construction
+    residual = r - basis.T @ (basis @ r)
+    assert residual.norm() / r.norm() < 1e-3
+
+
+def test_covmatched_ensemble_matches_the_single_draw():
+    s, like = _samples(), torch.randn(L, H)
+    ens = DIR.covmatched_random_ensemble(s, like, n=4, seed=11)
+    assert list(ens) == [f"covrand_{i:03d}" for i in range(4)]
+    assert torch.allclose(ens["covrand_002"], DIR.covmatched_random_direction(s, like, seed=13))
+
+
+def test_decomposition_is_computed_on_raw_means():
+    """Hand-computed against the construction in `_means`: mixed = base + 3*generic
+    + 0.4*trait with generic and trait unit-norm, so ||iso|| / ||mixed|| is
+    0.4 / ||3*generic + 0.4*trait||."""
+    means, trait, generic = _means()
+    rows = DIR.decomposition_table(means)
+    assert len(rows) == L
+
+    for layer, row in enumerate(rows):
+        mixed = (3.0 * generic[layer] + 0.4 * trait[layer]).norm()
+        assert row["norm_mixed"] == pytest.approx(float(mixed), rel=1e-5)
+        assert row["norm_clean"] == pytest.approx(3.0, rel=1e-5)
+        assert row["norm_iso"] == pytest.approx(0.4, rel=1e-5)
+        assert row["iso_over_mixed"] == pytest.approx(0.4 / float(mixed), rel=1e-5)
+        # iso is 0.4*trait; pureA is 3*generic + 4*trait, so the cosine is the
+        # trait's share of pureA -- ~0.8, not 1.0. That gap is exactly what the
+        # real table has to be able to show.
+        pure = 3.0 * generic[layer] + 4.0 * trait[layer]
+        expected = float(trait[layer] @ pure / pure.norm())
+        assert row["cos_iso_pureA"] == pytest.approx(expected, rel=1e-4)
+        assert 0.7 < row["cos_iso_pureA"] < 0.9
+
+
+def test_decomposition_tolerates_missing_arms():
+    means, _, _ = _means()
+    rows = DIR.decomposition_table({k: means[k] for k in ("base", "student_mixed")})
+    assert math.isnan(rows[0]["norm_iso"])
+    assert rows[0]["norm_mixed"] > 0
+
+
+def test_normalizing_before_differencing_destroys_the_magnitude():
+    """`unit(delta_mixed) - unit(delta_clean)` is NOT delta_iso.
+
+    It can point almost the same way -- here the cosine is ~0.999 -- while
+    carrying a completely different magnitude, and magnitude is the entire
+    content of `iso_over_mixed`. This is why `decomposition_table` differences
+    the raw means and never the unit directions.
+    """
+    means, _, _ = _means()
+    raw_iso = means["student_mixed"] - means["student_clean_matched"]
+    wrong = (
+        DIR.diff(means["student_mixed"], means["base"])
+        - DIR.diff(means["student_clean_matched"], means["base"])
+    )
+    assert float(raw_iso.norm(dim=-1)[3]) == pytest.approx(0.4, rel=1e-4)
+    assert float(wrong.norm(dim=-1)[3]) < 0.2, "the unit difference is 3x too small"
+
+
+def test_final_norm_is_found_on_a_qwen_model(tiny_model):
+    assert DIR._final_norm(tiny_model) is tiny_model.model.norm
+
+
+def test_logit_lens_reads_both_ends(tiny_model):
+    direction = torch.randn(tiny_model.config.num_hidden_layers + 1,
+                            tiny_model.config.hidden_size)
+
+    class _Tok:
+        def decode(self, ids):
+            return f"<{ids[0]}>"
+
+    out = DIR.logit_lens_topk(tiny_model, _Tok(), direction, layers=[1, 2], k=5)
+    assert sorted(out) == [1, 2]
+    assert len(out[1]["top"]) == len(out[1]["bottom"]) == 5
+    assert out[1]["top"][0][1] > out[1]["bottom"][0][1]
+
+
+def test_steering_the_embedding_slot_is_refused(tiny_model):
+    direction = torch.randn(tiny_model.config.num_hidden_layers + 1,
+                            tiny_model.config.hidden_size)
+    with pytest.raises(ValueError, match="embedding slot"):
+        DIR.steer_generate(tiny_model, None, direction, layer=0, alphas=[1.0], prompt="hi")
