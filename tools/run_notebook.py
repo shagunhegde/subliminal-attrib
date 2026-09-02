@@ -24,15 +24,36 @@ import time
 from pathlib import Path
 
 
+def _streaming_client_class():
+    """A NotebookClient that echoes cell stdout as it arrives.
+
+    Saving after each cell is not enough on its own: nbclient buffers a cell's
+    output into the notebook and only writes it when the cell returns, so a cell
+    that runs for an hour -- the gradient cache in 06, the batch poll in 03 --
+    is completely silent while it is the only thing happening. `process_message`
+    is the one seam where the kernel's stream messages are visible in flight.
+    """
+    from nbclient import NotebookClient
+
+    class StreamingNotebookClient(NotebookClient):
+        def process_message(self, msg, cell, cell_index):
+            if msg.get("msg_type") == "stream":
+                text = msg.get("content", {}).get("text", "")
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            return super().process_message(msg, cell, cell_index)
+
+    return StreamingNotebookClient
+
+
 def run(source: Path, out: Path, workdir: Path, timeout: int = -1) -> int:
     import nbformat
-    from nbclient import NotebookClient
     from nbclient.exceptions import CellExecutionError
 
     nb = nbformat.read(source, as_version=4)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    client = NotebookClient(
+    client = _streaming_client_class()(
         nb,
         timeout=timeout,
         kernel_name="python3",
