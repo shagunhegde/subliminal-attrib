@@ -418,3 +418,47 @@ a projection onto a fixed direction.
 Note also that the best cell is a maximum over 29 correlated layers x 6 aggregations, so
 these figures are optimistically biased. Phase 7 must select (layer, aggregation) on
 `easy` and report on `main`, or bootstrap the selection itself.
+
+## D11 — The trainer trained every student twice (fixed)
+
+`train_student` called `repo2_train().train(...)`, wrote the completion marker, and then
+called `resolve_config` and `train(...)` a **second** time on the same output directory.
+Present from the first trainer commit; the Colab preflight paid for it.
+
+Two costs, one of them silent:
+
+1. **Every student trained twice.** The measured 0.678 pure-cat organism (I7) is a
+   6-epoch model reported as 3 epochs, and every GPU estimate in `docs/compute_log.md`
+   before this date is a double bill.
+2. **A crash in the second pass leaves a false completion marker.** The marker is written
+   between the two calls, so `train_student` would skip on the next run and hand back an
+   adapter that was overwritten mid-flight.
+
+Fixed by deleting the second call. `tests/test_train.py::test_train_is_called_exactly_once`
+monkeypatches the trainer and asserts a single invocation; a second `train_student` on the
+same directory must skip entirely.
+
+**Consequence for PLAN v2.** The pivot students are genuinely 3-epoch. If they transmit
+more weakly than the 0.678 preflight, the double-training is the first explanation to
+check, not the corpus.
+
+## D12 — The ADL readout is an in-house logit lens, not `diffing-toolkit`
+
+`third_party/diffing-toolkit` is pinned for the Activation Difference Lens readout
+(arXiv:2510.13900). PLAN v2's notebook 05 does not use it. That repo consumes finished
+adapters through its own Hydra config surface and nnsight model wrappers; wiring our
+directions into it is a day of integration for two functions:
+
+* `directions.logit_lens_topk` — final norm + unembedding of the unit direction, both
+  ends returned (for a numbers corpus the failure mode "the direction is just more digits"
+  is only visible in the pair).
+* `directions.steer_generate` — repo2's `steering_hooks` in `add`/`unit` mode at one
+  layer, over a sweep of alphas.
+
+Together ~40 lines. The pin stays because the *protocol* is theirs and the report cites
+it; the implementation is ours, and the report must say so rather than implying the
+reference implementation was run.
+
+Note the index shift this makes explicit: our directions are `[n_blocks + 1, H]` with slot
+0 the embedding, while repo2's `steering_hooks` indexes `model.model.layers` from 0. Layer
+`l` here is `layers=[l - 1]` over `direction[1:]`.
