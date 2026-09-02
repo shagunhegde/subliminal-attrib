@@ -390,3 +390,352 @@ def score_dataset(
             print(f"  scored {i + 1}/{len(examples)}", flush=True)
 
     return rows
+
+
+# -- cached gradient features (PLAN v2) ----------------------------------------
+#
+# `score_dataset` recomputes a backward pass for every (direction, layer,
+# aggregation) sweep it is asked for. PLAN v2 asks the same 29-layer gradients to
+# be scored against 4 trait directions AND a 96-direction null, twice (training
+# set and held-out) plus a placebo -- which is the same backward pass paid for
+# hundreds of times.
+#
+# Caching the raw per-token gradients is infeasible: [T, 29, 3584] in fp32 is
+# ~80 MB for a single example. But every aggregation in CACHE_AGGREGATIONS is a
+# LINEAR functional of the gradient before the dot product with delta, so the
+# sufficient statistics are tiny:
+#
+#   sum_response       -> sum over scored positions            [L, H]
+#   mean_response      -> that sum / n_scored                  [L, H] + scalar
+#   assistant_tag_only -> the gradient at one position         [L, H]
+#   cosine             -> cos(sum over scored positions, delta)
+#
+# Note what the last line costs: the cached `cosine` is the cosine of the SUMMED
+# gradient against delta, not the mean of per-token cosines that
+# `aggregate_scores` computes. They are different statistics and the report must
+# label it as such. The other three are exact.
+
+CACHE_AGGREGATIONS = ("sum_response", "mean_response", "assistant_tag_only", "cosine")
+
+FEATURE_KEYS = ("sum_response", "assistant_tag", "grad_norm", "n_scored", "loss")
+
+
+def has_adapter(model) -> bool:
+    """True if any PEFT/LoRA layer is attached.
+
+    The scoring model must be the BASE model: `attribution.scoring_model` is
+    `base` because that is what a real auditor holds, and scoring under the
+    student would leak the answer into the gradient. A `PeftModel` left attached
+    from an earlier cell is silent -- the forward pass simply produces different
+    numbers.
+    """
+    return any("lora" in type(m).__name__.lower() for m in model.modules())
+
+
+def assert_no_adapter(model) -> None:
+    if has_adapter(model):
+        raise RuntimeError(
+            "an adapter is still attached to the scoring model; gradients must be "
+            "taken under the BASE model (config attribution.scoring_model='base'). "
+            "Call `peft_model.unload()` first."
+        )
+
+
+def _prompt_completion(ex) -> tuple[str, str]:
+    """Accept either a repo2-schema dict or a `mixtures.Example`."""
+    if isinstance(ex, dict):
+        return ex["prompt"], ex["completion"]
+    return ex.prompt, ex.completion
+
+
+def gradient_features_one(
+    grads: list[torch.Tensor],
+    labels: torch.Tensor,
+    assistant_tag_index: int,
+) -> dict:
+    """Per-example sufficient statistics for every cached aggregation.
+
+    Accumulated in fp32 whatever the model's compute dtype, for the same reason
+    `aggregate_scores` does: the model runs in bf16, and these are sums over
+    thousands of terms (deviations I2).
+    """
+    n_layers = len(grads)
+    seq_len = grads[0].shape[1]
+    hidden = grads[0].shape[2]
+
+    # Identical masking to `aggregate_scores`: position t predicts token t+1, so
+    # the last position is never scored.
+    scored = response_positions(labels)
+    mask = torch.zeros(seq_len, dtype=torch.bool, device=grads[0].device)
+    n_valid = min(scored.shape[1], seq_len)
+    mask[:n_valid] = scored[0, :n_valid]
+    i_tag = min(max(assistant_tag_index, 0), seq_len - 1)
+
+    sum_response = torch.zeros(n_layers, hidden, dtype=torch.float32)
+    assistant_tag = torch.zeros(n_layers, hidden, dtype=torch.float32)
+    grad_norm = torch.zeros(n_layers, dtype=torch.float32)
+
+    for layer, grad in enumerate(grads):
+        g = grad[0].float()
+        assistant_tag[layer] = g[i_tag].cpu()
+        if mask.any():
+            sel = g[mask]
+            sum_response[layer] = sel.sum(dim=0).cpu()
+            grad_norm[layer] = sel.norm().cpu()
+
+    return {
+        "sum_response": sum_response,
+        "assistant_tag": assistant_tag,
+        "grad_norm": grad_norm,
+        "n_scored": int(mask.sum()),
+    }
+
+
+def _examples_digest(examples) -> str:
+    import hashlib
+
+    h = hashlib.sha1()
+    for ex in examples:
+        p, c = _prompt_completion(ex)
+        h.update(p.encode())
+        h.update(b"\x00")
+        h.update(c.encode())
+        h.update(b"\x01")
+    return h.hexdigest()
+
+
+def cache_gradient_features(
+    model,
+    tokenizer,
+    examples: list,
+    out_dir: "str | Path",
+    chunk_size: int = 250,
+    max_length: int | None = None,
+    token_grad_layer: int | None = 8,
+    progress_every: int = 100,
+) -> "Path":
+    """One backward pass per example, aggregates written to disk, resumable.
+
+    Writes `chunk_{k:05d}.pt` (the [L, H] aggregates) and, when
+    `token_grad_layer` is set, `chunk_{k:05d}_tokgrad.pt` (that layer's
+    per-token gradients in bf16, as a list of ragged `[T, H]` tensors). The two
+    are separate files so `load_gradient_features` never pays for the large one.
+
+    Resumption is per chunk and refuses to mix runs: the manifest records a
+    digest of the exact example list, so a resume against different examples
+    fails loudly instead of concatenating two different datasets.
+    """
+    import json
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = out_dir / "manifest.json"
+
+    assert_no_adapter(model)
+    freeze_params(model)
+    device = next(model.parameters()).device
+
+    manifest = {
+        "n_examples": len(examples),
+        "chunk_size": chunk_size,
+        "max_length": max_length,
+        "token_grad_layer": token_grad_layer,
+        "examples_sha1": _examples_digest(examples),
+    }
+    if manifest_path.exists():
+        old = json.loads(manifest_path.read_text())
+        differing = {k: (old.get(k), v) for k, v in manifest.items() if old.get(k) != v}
+        if differing:
+            raise RuntimeError(
+                f"{out_dir} holds a cache built with different settings: {differing}. "
+                "Point at a fresh directory rather than resuming into it."
+            )
+    else:
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    for start in range(0, len(examples), chunk_size):
+        k = start // chunk_size
+        chunk_path = out_dir / f"chunk_{k:05d}.pt"
+        if chunk_path.exists():
+            print(f"[skip] chunk {k}: already cached", flush=True)
+            continue
+
+        batch = examples[start : start + chunk_size]
+        rows: list[dict] = []
+        token_grads: list[torch.Tensor] = []
+        for offset, ex in enumerate(batch):
+            prompt, completion = _prompt_completion(ex)
+            enc = encode_example(tokenizer, prompt, completion, max_length=max_length)
+            ids = enc.input_ids.to(device)
+            attn = enc.attention_mask.to(device)
+            labels = enc.labels.to(device)
+
+            logits, residuals = forward_with_residuals(model, ids, attn)
+            loss = response_ce_loss(logits, labels)
+            grads = grads_wrt_residuals(loss, residuals)
+
+            if token_grad_layer is not None and not 0 <= token_grad_layer < len(grads):
+                raise ValueError(
+                    f"token_grad_layer={token_grad_layer} is out of range for a model with "
+                    f"{len(grads)} residual slots (0 is the embedding)"
+                )
+            feats = gradient_features_one(grads, labels, enc.assistant_tag_index)
+            feats["loss"] = float(loss.detach())
+            feats["example_index"] = start + offset
+            rows.append(feats)
+            if token_grad_layer is not None:
+                token_grads.append(grads[token_grad_layer][0].to(torch.bfloat16).cpu())
+
+            del logits, residuals, grads, loss
+            n_done = start + offset + 1
+            if progress_every and n_done % progress_every == 0:
+                print(f"  gradients {n_done}/{len(examples)}", flush=True)
+
+        payload = {
+            "example_index": torch.tensor([r["example_index"] for r in rows], dtype=torch.long),
+            "sum_response": torch.stack([r["sum_response"] for r in rows]),
+            "assistant_tag": torch.stack([r["assistant_tag"] for r in rows]),
+            "grad_norm": torch.stack([r["grad_norm"] for r in rows]),
+            "n_scored": torch.tensor([r["n_scored"] for r in rows], dtype=torch.long),
+            "loss": torch.tensor([r["loss"] for r in rows], dtype=torch.float32),
+        }
+        torch.save(payload, chunk_path)
+        if token_grad_layer is not None:
+            torch.save(
+                {"layer": token_grad_layer, "grads": token_grads},
+                out_dir / f"chunk_{k:05d}_tokgrad.pt",
+            )
+
+    return out_dir
+
+
+def load_gradient_features(out_dir: "str | Path") -> dict:
+    """Concatenate every cached chunk. Asserts the examples are contiguous."""
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    chunks = sorted(p for p in out_dir.glob("chunk_*.pt") if not p.name.endswith("_tokgrad.pt"))
+    if not chunks:
+        raise FileNotFoundError(f"no cached gradient chunks under {out_dir}")
+    loaded = [torch.load(p, map_location="cpu", weights_only=True) for p in chunks]
+
+    out = {k: torch.cat([c[k] for c in loaded]) for k in loaded[0]}
+    idx = out["example_index"]
+    expected = torch.arange(len(idx))
+    if not torch.equal(idx, expected):
+        raise RuntimeError(
+            f"{out_dir}: cached example indices are not 0..{len(idx) - 1}; "
+            "a chunk is missing or was written by a different run"
+        )
+    return out
+
+
+def load_token_grads(out_dir: "str | Path") -> tuple[int, list[torch.Tensor]]:
+    """The per-token gradients at the single cached layer, in example order."""
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    chunks = sorted(out_dir.glob("chunk_*_tokgrad.pt"))
+    if not chunks:
+        raise FileNotFoundError(f"no per-token gradients under {out_dir}")
+    loaded = [torch.load(p, map_location="cpu", weights_only=False) for p in chunks]
+    layers = {c["layer"] for c in loaded}
+    if len(layers) != 1:
+        raise RuntimeError(f"{out_dir}: mixed token_grad_layer values {layers}")
+    return layers.pop(), [g for c in loaded for g in c["grads"]]
+
+
+def score_tensors(
+    features: dict,
+    deltas: dict[str, torch.Tensor],
+    aggregations: tuple[str, ...] = CACHE_AGGREGATIONS,
+    layers: list[int] | None = None,
+    chunk: int = 1000,
+) -> dict:
+    """Score cached features against every direction, in wide form.
+
+    Returns `{"scores": {aggregation: ndarray[n, n_directions, n_layers]},
+    "directions": [...], "layers": [...]}`. The long-form melt of this is
+    hundreds of millions of rows once the 96-direction null is included, which
+    is why the null path stays wide and goes straight into `metrics.auroc_grid`.
+    """
+    import numpy as np
+
+    names = list(deltas)
+    stacked = torch.stack([deltas[k].float() for k in names])  # [K, L, H]
+    n_layers_total = features["sum_response"].shape[1]
+    if stacked.shape[1] != n_layers_total:
+        raise ValueError(
+            f"directions have {stacked.shape[1]} layers, cached gradients have "
+            f"{n_layers_total} (index 0 is the embedding, matching repo2 mean_activations)"
+        )
+    layers = list(range(n_layers_total)) if layers is None else list(layers)
+    d = stacked[:, layers, :]                       # [K, l, H]
+    d_norm = d.norm(dim=-1).clamp(min=1e-12)        # [K, l]
+
+    unknown = set(aggregations) - set(CACHE_AGGREGATIONS)
+    if unknown:
+        raise ValueError(f"aggregations {sorted(unknown)} are not derivable from the cache")
+
+    n = features["sum_response"].shape[0]
+    out = {a: np.empty((n, len(names), len(layers)), dtype=np.float32) for a in aggregations}
+    n_scored = features["n_scored"].float()
+
+    for start in range(0, n, chunk):
+        stop = min(start + chunk, n)
+        sums = features["sum_response"][start:stop][:, layers, :].float()   # [b, l, H]
+        dot = torch.einsum("blh,klh->bkl", sums, d)
+        empty = (n_scored[start:stop] == 0).view(-1, 1, 1)
+
+        for agg in aggregations:
+            if agg == "sum_response":
+                v = -dot
+            elif agg == "mean_response":
+                v = -dot / n_scored[start:stop].clamp(min=1).view(-1, 1, 1)
+            elif agg == "assistant_tag_only":
+                tags = features["assistant_tag"][start:stop][:, layers, :].float()
+                v = -torch.einsum("blh,klh->bkl", tags, d)
+            else:  # cosine of the SUMMED response gradient -- see the note above
+                sn = sums.norm(dim=-1).clamp(min=1e-12).unsqueeze(1)        # [b, 1, l]
+                v = -dot / (sn * d_norm.unsqueeze(0))
+            out[agg][start:stop] = v.masked_fill(empty, float("nan")).numpy()
+
+    return {"scores": out, "directions": names, "layers": layers}
+
+
+def score_from_cache(
+    features: dict,
+    deltas: dict[str, torch.Tensor],
+    aggregations: tuple[str, ...] = CACHE_AGGREGATIONS,
+    layers: list[int] | None = None,
+    chunk: int = 1000,
+) -> "object":
+    """`score_tensors` melted to the long form the metrics layer consumes.
+
+    Columns: example_index, layer, direction, aggregation, score.
+    """
+    import numpy as np
+    import pandas as pd
+
+    wide = score_tensors(features, deltas, aggregations, layers, chunk)
+    n = features["sum_response"].shape[0]
+    names, lays = wide["directions"], wide["layers"]
+
+    frames = []
+    for agg, arr in wide["scores"].items():
+        idx = np.repeat(np.arange(n), len(names) * len(lays))
+        direction = np.tile(np.repeat(np.array(names, dtype=object), len(lays)), n)
+        layer = np.tile(np.array(lays), n * len(names))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "example_index": idx,
+                    "layer": layer,
+                    "direction": direction,
+                    "aggregation": agg,
+                    "score": arr.reshape(-1),
+                }
+            )
+        )
+    return pd.concat(frames, ignore_index=True)
