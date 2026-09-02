@@ -1,0 +1,56 @@
+# PLAN v2: "what is in the diff vector, and can it be run backwards?"
+#
+# Three A fractions instead of one. The gate (notebook 02) picks the LOWEST
+# fraction whose behavioural transfer is separable from the clean student, and
+# everything downstream reads that choice from RUN/gate.json -- so the dose is a
+# measured property of this corpus, not an assumption carried over from `easy`.
+#
+# All three mixtures share seed 0 and total 10000, so `build_mixture` draws the
+# SAME 10,000 prompts for each. With counterpart N and no B in the mixture, the
+# clean counterpart is the N completion of every chosen prompt regardless of the
+# A fraction -- mix10_clean.jsonl, mix25_clean.jsonl and mix50_clean.jsonl are
+# byte-identical, and one clean student serves all three (asserted in 00).
+#
+# Prompts at shuffled index >= 10000 were never trained on and still carry both
+# an A and an N completion, which is where the direction prompts and the
+# held-out scoring set come from.
+name: pivot
+tier: FULL
+seed: 0
+entity_a: cat
+entity_b: dog
+
+ingest:
+  sources:
+    - {label: A, entity: cat,  hf_repo: "jeqcho/qwen-2.5-7b-instruct-cat-numbers-run-0",     revision: "09c57ade20bd9e0053f27834fe60ccd739b4b591"}
+    - {label: B, entity: dog,  hf_repo: "jeqcho/qwen-2.5-7b-instruct-dog-numbers-run-0",     revision: "760c8c0d0a7c655b5576312a4c190d9a2453953d"}
+    - {label: N, entity: null, hf_repo: "jeqcho/qwen-2.5-7b-instruct-neutral-numbers-run-0", revision: "96eabd20390d5607811e0366b015a0af2a302ef5"}
+  crosscheck_repo: "minhxle/subliminal-learning_numbers_dataset"
+  crosscheck_configs: ["qwen2.5-7b-instruct_cat_preference", "qwen2.5-7b-instruct_dog_preference"]
+  max_per_source: null          # all ~27k rows; the three-way join needs the depth
+
+# B stays ingested but nothing trains on it. Removing the source would change the
+# three-way join, and therefore the shuffle, and therefore every mixture.
+mixtures:
+  pairing: matched              # see docs/deviations.md D3
+  specs:
+    - {name: mix10, total: 10000, fractions: {A: 0.10, N: 0.90}, counterpart: N}
+    - {name: mix25, total: 10000, fractions: {A: 0.25, N: 0.75}, counterpart: N}
+    - {name: mix50, total: 10000, fractions: {A: 0.50, N: 0.50}, counterpart: N}
+  userspec_total: 10000         # also what sizes pure_A.jsonl, the ceiling arm
+  userspec_source: B
+
+train:
+  # 3 epochs is Cloud et al.'s recipe, the only configuration known to transmit
+  # on Qwen2.5-7B (I7). The recipe is applied inside `resolve_config` and so is
+  # NOT part of the run hash -- stating the epochs here is what makes the hash
+  # reflect what was actually trained.
+  num_train_epochs: 3
+  packing: false                # MUST stay false -- deviations D4
+  val_split: 0.0                # MUST stay 0.0  -- every example must be trained on
+  attn_implementation: sdpa
+  seed: 1
+
+attribution:
+  scoring_model: base
+  batch_size: 1                 # the gradient pass is one example at a time

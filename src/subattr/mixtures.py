@@ -283,3 +283,81 @@ def build_all(cfg: Config, ingest_dir: Path | None = None) -> dict[str, MixtureB
         )
     )
     return builds
+
+
+# -- held-out and derived subsets (PLAN v2) ------------------------------------
+
+
+def shuffled_prompts(joined: dict[str, dict[str, str]], seed: int) -> list[str]:
+    """The exact prompt order `build_mixture` draws from.
+
+    `build_mixture` takes `prompts[:spec.total]` off the front of this list, so
+    everything from index `total` onward was never trained on by any student
+    built from `joined` at this seed -- and, because the join is matched, each of
+    those prompts still carries a completion from every source. That is where the
+    held-out direction prompts and the held-out scoring set come from, for free.
+    """
+    prompts = list(joined)
+    rng = random.Random(seed)
+    rng.shuffle(prompts)
+    return prompts
+
+
+def heldout_examples(
+    joined: dict[str, dict[str, str]],
+    total: int,
+    seed: int,
+    n: int,
+    start: int = 0,
+    sources: tuple[str, ...] = ("A", "N"),
+) -> dict[str, list[Example]]:
+    """`n` examples per source from prompts no mixture of size `total` used.
+
+    `start` indexes into the held-out pool (shuffled index `total + start`), so
+    disjoint windows can be carved out for different purposes -- direction
+    extraction must not share prompts with the held-out scoring set, or the
+    direction is measured on the examples it is then used to rank.
+    """
+    pool = shuffled_prompts(joined, seed)[total:]
+    window = pool[start : start + n]
+    if len(window) < n:
+        raise ValueError(
+            f"held-out pool has {len(pool)} prompts; window [{start}, {start + n}) needs "
+            f"{n} and only {len(window)} are available"
+        )
+    return {
+        s: [Example(prompt=p, completion=joined[p][s], source=s) for p in window]
+        for s in sources
+    }
+
+
+def balanced_subset(
+    sources: list[str], positive: str = "A", seed: int = 0, n_neg: int | None = None
+) -> list[int]:
+    """Indices of every positive plus an equal random sample of the rest.
+
+    Scoring every example of a 10k mixture is unnecessary: at a 10% A fraction,
+    9,000 of them are negatives and a few hundred already pin the negative
+    distribution. Balancing also makes P@k and average precision comparable
+    across mixture fractions, which they are not on the raw mixtures.
+    """
+    pos = [i for i, s in enumerate(sources) if s == positive]
+    neg = [i for i, s in enumerate(sources) if s != positive]
+    k = len(pos) if n_neg is None else n_neg
+    rng = random.Random(seed)
+    return sorted(pos + rng.sample(neg, min(k, len(neg))))
+
+
+def placebo_sources(n_total: int, n_planted: int, seed: int) -> list[str]:
+    """Fake provenance labels over a corpus that is uniformly one source.
+
+    The placebo control: run the entire scoring pipeline against labels that
+    cannot carry information, because every example really is source N. Any
+    scorer that separates these labels above chance is measuring the pipeline,
+    not the trait.
+    """
+    if n_planted > n_total:
+        raise ValueError(f"cannot plant {n_planted} labels in {n_total} examples")
+    rng = random.Random(seed)
+    planted = set(rng.sample(range(n_total), n_planted))
+    return ["A" if i in planted else "N" for i in range(n_total)]

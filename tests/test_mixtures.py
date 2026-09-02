@@ -238,3 +238,95 @@ def test_easy_and_main_place_a_at_the_same_indices():
     assert [easy.mixed[i].completion for i in easy.a_indices] == [
         main.mixed[i].completion for i in main.a_indices
     ]
+
+
+# -- PLAN v2: held-out pool, balanced subsets, placebo labels -------------------
+
+
+def _joined(n=200):
+    return three_way_join(_corpus(n))
+
+
+def test_shuffled_prompts_is_the_order_build_mixture_uses():
+    from subattr.mixtures import shuffled_prompts
+
+    joined = _joined()
+    build = build_mixture(joined, _spec(total=100), pairing="matched", seed=7)
+    assert [e.prompt for e in build.mixed] == shuffled_prompts(joined, 7)[:100]
+
+
+def test_heldout_prompts_never_appear_in_the_mixture():
+    """The whole point: directions must not be measured on memorized examples."""
+    from subattr.mixtures import heldout_examples
+
+    joined = _joined()
+    build = build_mixture(joined, _spec(total=100), pairing="matched", seed=0)
+    trained = {e.prompt for e in build.mixed}
+
+    held = heldout_examples(joined, total=100, seed=0, n=20)
+    assert set(held) == {"A", "N"}
+    for arm in held.values():
+        assert not ({e.prompt for e in arm} & trained)
+
+
+def test_heldout_windows_are_disjoint_and_prompt_matched():
+    from subattr.mixtures import heldout_examples
+
+    joined = _joined()
+    first = heldout_examples(joined, total=100, seed=0, n=20, start=0)
+    second = heldout_examples(joined, total=100, seed=0, n=20, start=20)
+    assert not ({e.prompt for e in first["A"]} & {e.prompt for e in second["A"]})
+    # A and N answer the identical questions -- required by the pairwise judge
+    assert [e.prompt for e in first["A"]] == [e.prompt for e in first["N"]]
+
+
+def test_heldout_window_beyond_the_pool_raises():
+    from subattr.mixtures import heldout_examples
+
+    with pytest.raises(ValueError, match="held-out pool"):
+        heldout_examples(_joined(200), total=190, seed=0, n=50)
+
+
+def test_balanced_subset_keeps_every_positive():
+    from subattr.mixtures import balanced_subset
+
+    sources = ["A" if i % 10 == 0 else "N" for i in range(100)]
+    idx = balanced_subset(sources, seed=0)
+    kept = [sources[i] for i in idx]
+    assert kept.count("A") == 10 == sources.count("A")
+    assert kept.count("N") == 10
+    assert idx == sorted(idx)
+    assert balanced_subset(sources, seed=0) == balanced_subset(sources, seed=0)
+    assert balanced_subset(sources, seed=1) != balanced_subset(sources, seed=0)
+
+
+def test_placebo_sources_plants_the_right_count_and_is_deterministic():
+    from subattr.mixtures import placebo_sources
+
+    labels = placebo_sources(1000, 100, seed=3)
+    assert len(labels) == 1000
+    assert labels.count("A") == 100
+    assert set(labels) == {"A", "N"}
+    assert labels == placebo_sources(1000, 100, seed=3)
+    assert labels != placebo_sources(1000, 100, seed=4)
+
+
+def test_placebo_cannot_plant_more_than_it_has():
+    from subattr.mixtures import placebo_sources
+
+    with pytest.raises(ValueError, match="cannot plant"):
+        placebo_sources(10, 11, seed=0)
+
+
+def test_one_clean_student_serves_every_fraction():
+    """mix10/mix25/mix50 share a seed and a total, so `chosen` is identical and
+    every clean counterpart is the N completion of the same prompt -- the three
+    clean files are byte-identical and only one clean student is needed."""
+    joined = _joined(400)
+    cleans = []
+    for frac in (0.10, 0.25, 0.50):
+        spec = _spec(name=f"mix{int(frac * 100)}", total=300,
+                     fractions={"A": frac, "N": 1 - frac}, counterpart="N")
+        build = build_mixture(joined, spec, pairing="matched", seed=0)
+        cleans.append([(e.prompt, e.completion) for e in build.clean])
+    assert cleans[0] == cleans[1] == cleans[2]
