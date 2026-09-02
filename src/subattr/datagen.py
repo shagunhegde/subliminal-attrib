@@ -329,6 +329,12 @@ def numeric_separability(rows_by_source: dict[str, list[dict]]) -> dict[str, dic
     }
     have = set(feats)
     splits: dict[str, tuple[list[dict], list[dict]]] = {}
+    if {"A", "N"} <= have:
+        # The PLAN v2 mixtures contain no B at all, so this is the only split
+        # that exists there. Without it the function silently returned an empty
+        # table for a two-arm corpus rather than failing -- which is how a
+        # missing negative control looks like a passing one.
+        splits["A vs N"] = (feats["A"], feats["N"])
     if {"A", "B"} <= have:
         splits["A vs B"] = (feats["A"], feats["B"])
     if {"A", "B", "N"} <= have:

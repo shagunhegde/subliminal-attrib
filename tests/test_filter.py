@@ -165,3 +165,33 @@ def test_separability_catches_a_planted_echo_confound():
     }
     sep = numeric_separability(rows)
     assert sep["(A u B) vs N"]["frac_echoed"] == 0.0, "echo confound must be visible"
+
+
+def test_separability_covers_a_two_arm_corpus():
+    """The pivot mixtures have no B, and the old split list required one.
+
+    A negative control that returns an empty table looks exactly like a negative
+    control that passed, which is the worst possible failure mode for it.
+    """
+    from subattr.datagen import numeric_separability
+
+    rows = {
+        "A": [{"prompt": "p", "completion": "7, 8, 9"} for _ in range(20)],
+        "N": [{"prompt": "p", "completion": "1, 2, 3"} for _ in range(20)],
+    }
+    sep = numeric_separability(rows)
+    assert "A vs N" in sep, "a two-arm corpus must still produce a split"
+    # A is the positive class and carries the larger values, so a feature that
+    # separates them perfectly reads 1.0 rather than 0.5.
+    assert sep["A vs N"]["mean_value"] == 1.0, "a planted difference must be detected"
+    assert sep["A vs N"]["is_descending"] == 0.5, "an identical feature must stay at chance"
+
+
+def test_separability_still_covers_the_three_arm_splits():
+    from subattr.datagen import numeric_separability
+
+    rows = {
+        s: [{"prompt": "p", "completion": "1, 2, 3"} for _ in range(10)]
+        for s in ("A", "B", "N")
+    }
+    assert set(numeric_separability(rows)) == {"A vs N", "A vs B", "A vs rest", "(A u B) vs N"}
